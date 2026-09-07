@@ -1,0 +1,14 @@
+services:
+  - type: web
+    name: instagram-cookie-extractor
+    runtime: python
+    plan: starter
+    buildCommand: |
+      pip install -r requirements.txt
+      playwright install chromium
+    startCommand: gunicorn app:app --timeout 120 --workers 1
+    envVars:
+      - key: BROWSERLESS_API_KEY
+        value: 2V9phNVcUGlxvJJ9154e14b2c71b8c81d6e0f2f23bcfaf323
+      - key: PROFILE_NAME
+        value: instagram-login
