@@ -22,18 +22,14 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ============================================
-# CONFIGURATION
+# ENVIRONMENT VARIABLES
 # ============================================
 
-BROWSERLESS_TOKEN = os.environ.get('BROWSERLESS_API_KEY', '2V9phNVcUGlxvJJ9154e14b2c71b8c81d6e0f2f23bcfaf323')
-BROWSERLESS_ORIGIN = 'https://production-sfo.browserless.io'
+USERNAME = os.environ.get('INSTAGRAM_USERNAME', 'hopefreymosingi')
+PASSWORD = os.environ.get('INSTAGRAM_PASSWORD', '')
+BROWSERLESS_TOKEN = os.environ.get('BROWSERLESS_API_KEY', '')
 PROFILE_NAME = os.environ.get('PROFILE_NAME', 'instagram-login')
-
-# Instagram credentials for login
-INSTAGRAM_USERNAME = os.environ.get('INSTAGRAM_USERNAME', '')
-INSTAGRAM_PASSWORD = os.environ.get('INSTAGRAM_PASSWORD', '')
-
-# Vercel webhook URL for sending cookies back
+BROWSERLESS_ORIGIN = os.environ.get('BROWSERLESS_ORIGIN', 'wss://production-sfo.browserless.io')
 VERCEL_WEBHOOK_URL = os.environ.get('VERCEL_WEBHOOK_URL', 'https://fetchgram-one.vercel.app/api/cookies/sync')
 
 # 2FA queue for communication between threads
@@ -235,7 +231,7 @@ HTML_TEMPLATE = '''
             
             <div id="twofaBox" class="twofa-box">
                 <strong>🔐 2FA Required</strong>
-                <p>Please enter your 6-digit authentication code:</p>
+                <p>Please enter your 6-digit authentication code (codes expire every 30 seconds):</p>
                 <div class="form-group">
                     <input type="text" id="twofaInput" placeholder="Enter 6-digit code" maxlength="6" inputmode="numeric" pattern="[0-9]*">
                 </div>
@@ -491,37 +487,42 @@ HTML_TEMPLATE = '''
 '''
 
 # ============================================
-# BROWSERLESS LOGIN WITH 2FA SUPPORT
+# BROWSERLESS LOGIN FUNCTION
 # ============================================
 
 def login_with_browserless(username, password):
-    """Login to Instagram using Browserless and handle 2FA"""
+    """Login to Instagram using Browserless and wait for 2FA"""
     global login_status, twofa_queue
     
     if not BROWSERLESS_TOKEN:
         return {"success": False, "error": "BROWSERLESS_API_KEY not set"}
     
     try:
-        logger.info(f"🚀 Starting login for: {username}")
+        logger.info(f"Starting login for: {username}")
         
-        # Step 1: Create profile session using Browserless API
-        logger.info("📝 Creating profile session...")
+        # Create profile session using Browserless API
+        logger.info("Creating profile session...")
+        
+        # Use the correct Browserless profile endpoint
+        profile_url = f"https://production-sfo.browserless.io/profile?token={BROWSERLESS_TOKEN}"
+        
         profile_response = requests.post(
-            f"{BROWSERLESS_ORIGIN}/profile?token={BROWSERLESS_TOKEN}",
+            profile_url,
             headers={'Content-Type': 'application/json'},
             json={'name': PROFILE_NAME}
         )
         
         if profile_response.status_code != 200:
             error_msg = f"Failed to create profile: {profile_response.text}"
-            logger.error(f"❌ {error_msg}")
+            logger.error(error_msg)
             return {"success": False, "error": error_msg}
         
         session_data = profile_response.json()
-        logger.info(f"✅ Profile session created: {session_data.get('id', 'unknown')}")
+        logger.info(f"✅ Profile session created")
         
-        # Step 2: Connect to Browserless
+        # Connect to Browserless using the session data
         with sync_playwright() as p:
+            # The session_data contains the WebSocket endpoint
             browser = p.chromium.connect_over_cdp(session_data['connect'])
             logger.info("✅ Connected to Browserless")
             
@@ -529,12 +530,12 @@ def login_with_browserless(username, password):
                 context = browser.contexts[0]
                 page = context.pages[0] if context.pages else context.new_page()
                 
-                # Step 3: Navigate to Instagram
-                logger.info("🌐 Navigating to Instagram login...")
+                # Navigate to Instagram
+                logger.info("Navigating to Instagram...")
                 page.goto('https://www.instagram.com/accounts/login/', wait_until='domcontentloaded')
-                time.sleep(2)
+                time.sleep(3)
                 
-                # Step 4: Handle cookie banner
+                # Handle cookie banner
                 try:
                     allow_cookies = page.query_selector('button:has-text("Allow all cookies")')
                     if allow_cookies:
@@ -544,57 +545,81 @@ def login_with_browserless(username, password):
                 except:
                     pass
                 
-                # Step 5: Fill username
-                logger.info("📝 Filling username...")
+                # Fill username
+                logger.info("Filling username...")
                 username_field = page.query_selector('input[name="username"]')
                 if username_field:
                     username_field.fill(username)
+                    logger.info("✅ Username filled")
                 else:
+                    # Fallback: find any text input
                     inputs = page.query_selector_all('input[type="text"]')
                     if inputs and len(inputs) > 0:
                         inputs[0].fill(username)
+                        logger.info("✅ Username filled (by fallback)")
                     else:
                         return {"success": False, "error": "Could not find username field"}
-                logger.info("✅ Username filled")
                 time.sleep(1)
                 
-                # Step 6: Fill password
-                logger.info("🔑 Filling password...")
+                # Fill password
+                logger.info("Filling password...")
                 password_field = page.query_selector('input[name="password"]')
-                if not password_field:
-                    password_field = page.query_selector('input[type="password"]')
                 if password_field:
                     password_field.fill(password)
                     logger.info("✅ Password filled")
                 else:
-                    return {"success": False, "error": "Could not find password field"}
+                    password_field = page.query_selector('input[type="password"]')
+                    if password_field:
+                        password_field.fill(password)
+                        logger.info("✅ Password filled (by type)")
+                    else:
+                        return {"success": False, "error": "Could not find password field"}
                 time.sleep(1)
                 
-                # Step 7: Submit login
-                logger.info("📤 Submitting login...")
+                # Submit
+                logger.info("Submitting login...")
                 submit_button = page.query_selector('button[type="submit"]')
                 if submit_button:
                     submit_button.click()
+                    logger.info("✅ Clicked login button")
                 else:
                     page.keyboard.press("Enter")
-                logger.info("✅ Login submitted")
+                    logger.info("✅ Pressed Enter")
                 
-                # Step 8: Wait for response
+                # Wait for response
+                logger.info("⏳ Waiting for response...")
                 page.wait_for_load_state('networkidle', timeout=30000)
                 time.sleep(3)
                 
-                # Step 9: Check current URL for 2FA
+                # Handle prompts
+                try:
+                    save_info = page.query_selector('button:has-text("Save Info")')
+                    if save_info:
+                        save_info.click()
+                        logger.info("✅ Handled 'Save Info' prompt")
+                except:
+                    pass
+                
+                try:
+                    not_now = page.query_selector('button:has-text("Not now")')
+                    if not_now:
+                        not_now.click()
+                        logger.info("✅ Handled 'Not now' prompt")
+                except:
+                    pass
+                
+                # Check if 2FA is required
                 current_url = page.url
-                logger.info(f"📍 Current URL: {current_url}")
+                logger.info(f"Current URL: {current_url}")
                 
                 if "two_step_verification" in current_url or "challenge" in current_url:
                     logger.info("🔐 2FA page detected! Waiting for user to enter code...")
                     login_status["awaiting_2fa"] = True
                     
-                    # Wait for 2FA code from queue (max 120 seconds)
+                    # Wait for 2FA code from the queue
                     try:
                         twofa_code = twofa_queue.get(timeout=120)
-                        logger.info(f"📱 Received 2FA code: {twofa_code}")
+                        logger.info(f"📱 Received 2FA code")
                         
                         # Find 2FA input field
                         twofa_input = None
@@ -602,8 +627,7 @@ def login_with_browserless(username, password):
                             'input[type="text"]',
                             'input[autocomplete="off"]',
                             'input[placeholder*="code" i]',
-                            'input[inputmode="numeric"]',
-                            'input[name="verificationCode"]'
+                            'input[inputmode="numeric"]'
                         ]
                         
                         for selector in selectors:
@@ -632,189 +656,78 @@ def login_with_browserless(username, password):
                         submit_2fa = page.query_selector('button[type="submit"]')
                         if submit_2fa:
                             submit_2fa.click()
-                            logger.info("✅ 2FA submitted via button")
+                            logger.info("✅ 2FA submitted")
                         else:
                             page.keyboard.press("Enter")
                             logger.info("✅ 2FA submitted with Enter")
                         
-                        # Step 10: Wait for login completion
-                        logger.info("⏳ Waiting for login completion...")
-                        time.sleep(3)
-                        
-                        # Check for "Save Info" button (login success indicator)
-                        login_complete = False
-                        login_indicators = []
-                        final_url = page.url
-                        
-                        for attempt in range(15):  # 15 attempts = ~30 seconds
-                            time.sleep(2)
-                            current_url = page.url
-                            logger.info(f"  Check {attempt+1}: URL: {current_url[:60]}...")
-                            
-                            # Check for "Save Info" button
-                            try:
-                                save_info_button = page.query_selector('button:has-text("Save Info")')
-                                if save_info_button:
-                                    logger.info("✅ 'Save Info' button found - login successful!")
-                                    login_complete = True
-                                    login_indicators.append("Save Info button")
-                                    final_url = current_url
-                                    # Click it to complete login
-                                    try:
-                                        save_info_button.click()
-                                        logger.info("✅ Clicked 'Save Info'")
-                                        time.sleep(1)
-                                    except:
-                                        pass
-                                    break
-                            except:
-                                pass
-                            
-                            # Check for "Not Now" button
-                            try:
-                                not_now_button = page.query_selector('button:has-text("Not Now")')
-                                if not_now_button:
-                                    logger.info("✅ 'Not Now' button found - login successful!")
-                                    login_complete = True
-                                    login_indicators.append("Not Now button")
-                                    final_url = current_url
-                                    break
-                            except:
-                                pass
-                            
-                            # Check if URL changed from login/2FA pages
-                            if "two_step_verification" not in current_url and "challenge" not in current_url:
-                                if "instagram.com" in current_url and "login" not in current_url:
-                                    login_complete = True
-                                    login_indicators.append(f"URL: {current_url[:50]}...")
-                                    final_url = current_url
-                                    break
-                            
-                            # Check for home page elements
-                            try:
-                                home_link = page.query_selector('a[href="/"]')
-                                if home_link:
-                                    login_complete = True
-                                    login_indicators.append("Home link found")
-                                    final_url = current_url
-                                    break
-                            except:
-                                pass
-                        
-                        # If still on 2FA page, try one more time
-                        if not login_complete and "two_step_verification" in page.url:
-                            logger.info("⏳ Still on 2FA page, checking one more time...")
-                            time.sleep(5)
-                            try:
-                                save_info_button = page.query_selector('button:has-text("Save Info")')
-                                if save_info_button:
-                                    logger.info("✅ 'Save Info' button found after extra wait!")
-                                    login_complete = True
-                                    login_indicators.append("Save Info button (extra wait)")
-                                    final_url = page.url
-                                    try:
-                                        save_info_button.click()
-                                    except:
-                                        pass
-                            except:
-                                pass
-                        
-                        login_status["awaiting_2fa"] = False
+                        # Wait for login to complete
+                        logger.info("⏳ Waiting for login confirmation...")
+                        time.sleep(5)
+                        page.wait_for_load_state('networkidle', timeout=30000)
                         
                     except queue.Empty:
                         logger.error("❌ 2FA timeout - no code received")
                         login_status["awaiting_2fa"] = False
-                        return {"success": False, "error": "2FA timeout - no code received"}
-                else:
-                    # No 2FA required - check if login was successful
-                    login_complete = "login" not in current_url and "instagram.com" in current_url
-                    final_url = current_url
-                    login_indicators = ["No 2FA required"]
-                    
-                    # Check for "Save Info" button
-                    if login_complete:
-                        try:
-                            save_info_button = page.query_selector('button:has-text("Save Info")')
-                            if save_info_button:
-                                login_indicators.append("Save Info button")
-                                try:
-                                    save_info_button.click()
-                                except:
-                                    pass
-                        except:
-                            pass
+                        return {"success": False, "error": "2FA timeout"}
+                    finally:
+                        login_status["awaiting_2fa"] = False
                 
-                # Step 11: Save session if login successful
-                if login_complete:
-                    logger.info(f"🎉 Login successful! Indicators: {', '.join(login_indicators)}")
+                # Check if login was successful
+                final_url = page.url
+                logger.info(f"Final URL: {final_url}")
+                
+                if "login" not in final_url and "two_step" not in final_url and "challenge" not in final_url:
+                    logger.info("✅ Login successful!")
                     
                     # Get cookies
                     cookies = page.context.cookies()
                     
                     # Save session to file
-                    session_data = {
-                        "username": username,
-                        "cookies": cookies,
-                        "timestamp": datetime.now().isoformat(),
-                        "url": final_url,
-                        "indicators": login_indicators
-                    }
-                    with open('session.json', 'w') as f:
-                        json.dump(session_data, f, indent=2)
-                    logger.info(f"✅ Session saved with {len(cookies)} cookies")
+                    try:
+                        session_data = {
+                            "username": username,
+                            "cookies": cookies,
+                            "timestamp": datetime.now().isoformat(),
+                            "url": final_url
+                        }
+                        with open('session.json', 'w') as f:
+                            json.dump(session_data, f, indent=2)
+                        logger.info(f"✅ Session saved with {len(cookies)} cookies")
+                    except Exception as e:
+                        logger.warning(f"Could not save session: {e}")
                     
                     # Save profile to Browserless
                     try:
-                        save_response = requests.post(
-                            f"{BROWSERLESS_ORIGIN}/profile/save?token={BROWSERLESS_TOKEN}",
-                            headers={'Content-Type': 'application/json'},
-                            json={
-                                'name': PROFILE_NAME,
-                                'state': {
-                                    'cookies': [
-                                        {
-                                            'name': c.get('name'),
-                                            'value': c.get('value'),
-                                            'domain': c.get('domain'),
-                                            'path': c.get('path', '/'),
-                                            'expires': c.get('expirationDate', -1),
-                                            'httpOnly': c.get('httpOnly', False),
-                                            'secure': c.get('secure', False),
-                                            'session': c.get('session', True)
-                                        }
-                                        for c in cookies
-                                    ],
-                                    'origins': []
-                                }
-                            }
-                        )
-                        if save_response.status_code in [200, 201]:
-                            logger.info("✅ Profile saved to Browserless")
-                        else:
-                            logger.warning(f"⚠️ Could not save profile: {save_response.status_code}")
+                        # Use CDP to save profile
+                        cdp_session = page.context.new_cdp_session(page)
+                        cdp_session.send('Browserless.saveProfile', {'name': PROFILE_NAME})
+                        logger.info("✅ Profile saved to Browserless")
                     except Exception as e:
-                        logger.warning(f"⚠️ Could not save profile to Browserless: {e}")
+                        logger.warning(f"Could not save profile to Browserless: {e}")
                     
                     # Send cookies to Vercel
-                    send_cookies_to_vercel(cookies, username)
+                    try:
+                        send_cookies_to_vercel(cookies, username)
+                    except Exception as e:
+                        logger.warning(f"Could not send cookies to Vercel: {e}")
                     
                     return {
                         "success": True,
                         "username": username,
                         "cookies": cookies,
                         "url": final_url,
-                        "message": "Login successful!",
-                        "indicators": login_indicators
+                        "message": "Login successful!"
                     }
                 else:
-                    # Check if we're stuck on 2FA page
-                    if page.url and "two_step_verification" in page.url:
-                        return {"success": False, "error": "2FA verification failed - code may be incorrect or expired. Try again with a fresh code.", "url": page.url}
-                    else:
-                        return {"success": False, "error": f"Login failed. URL: {page.url}", "url": page.url}
+                    return {
+                        "success": False,
+                        "error": f"Login failed. URL: {final_url}",
+                        "url": final_url
+                    }
                     
             except Exception as e:
-                logger.error(f"❌ Login error: {str(e)}")
+                logger.error(f"Login error: {str(e)}")
                 import traceback
                 logger.error(traceback.format_exc())
                 return {"success": False, "error": str(e)}
@@ -822,8 +735,49 @@ def login_with_browserless(username, password):
                 browser.close()
                 
     except Exception as e:
-        logger.error(f"❌ Browserless error: {str(e)}")
+        logger.error(f"Browserless error: {str(e)}")
+        import traceback
+        logger.error(traceback.format_exc())
         return {"success": False, "error": str(e)}
+
+# ============================================
+# SEND COOKIES TO VERCEL
+# ============================================
+
+def send_cookies_to_vercel(cookies, username=None):
+    """Send extracted cookies to Vercel webhook"""
+    if not VERCEL_WEBHOOK_URL:
+        logger.warning("⚠️ VERCEL_WEBHOOK_URL not set, skipping")
+        return
+    
+    try:
+        logger.info(f"📤 Sending {len(cookies)} cookies to Vercel...")
+        
+        # Get username from cookies if not provided
+        if not username:
+            for cookie in cookies:
+                if cookie.get('name') == 'ds_user_id':
+                    username = cookie.get('value')
+                    break
+        
+        response = requests.post(
+            VERCEL_WEBHOOK_URL,
+            json={
+                "cookies": cookies,
+                "username": username or "Instagram User",
+                "timestamp": datetime.now().isoformat()
+            },
+            headers={"Content-Type": "application/json"},
+            timeout=30
+        )
+        
+        if response.status_code == 200:
+            logger.info("✅ Cookies sent to Vercel successfully")
+        else:
+            logger.warning(f"⚠️ Vercel responded with: {response.status_code}")
+            
+    except Exception as e:
+        logger.error(f"❌ Failed to send cookies to Vercel: {e}")
 
 # ============================================
 # ROUTES
@@ -831,7 +785,7 @@ def login_with_browserless(username, password):
 
 @app.route('/')
 def index():
-    return render_template_string(HTML_TEMPLATE, username=INSTAGRAM_USERNAME)
+    return render_template_string(HTML_TEMPLATE, username=USERNAME)
 
 @app.route('/login', methods=['POST'])
 def login():
@@ -841,7 +795,7 @@ def login():
         return jsonify({"success": False, "message": "Login already in progress"})
     
     data = request.json or {}
-    username = data.get('username', INSTAGRAM_USERNAME)
+    username = data.get('username', USERNAME)
     password = data.get('password')
     
     if not username:
@@ -895,7 +849,7 @@ def status():
             "session_time": session_data.get('timestamp') if session_data else None,
             "session_url": session_data.get('url') if session_data else None,
             "session_indicators": session_data.get('indicators') if session_data else None,
-            "username": INSTAGRAM_USERNAME,
+            "username": USERNAME,
             "login_status": {
                 "in_progress": login_status.get("in_progress", False),
                 "completed": login_status.get("completed", False),
@@ -910,7 +864,7 @@ def status():
         return jsonify({
             "logged_in": False,
             "session_exists": False,
-            "username": INSTAGRAM_USERNAME,
+            "username": USERNAME,
             "login_status": {
                 "in_progress": False,
                 "completed": False,
@@ -955,6 +909,16 @@ def clear_session():
     except Exception as e:
         return jsonify({"success": False, "error": str(e)})
 
+@app.route('/health')
+def health():
+    return jsonify({
+        "status": "healthy",
+        "timestamp": datetime.now().isoformat(),
+        "browserless_configured": bool(BROWSERLESS_TOKEN),
+        "profile": PROFILE_NAME,
+        "session_exists": os.path.exists('session.json')
+    })
+
 # ============================================
 # BACKGROUND LOGIN
 # ============================================
@@ -970,52 +934,13 @@ def run_login_background(username, password):
         login_status["end_time"] = datetime.now().isoformat()
                 
     except Exception as e:
-        logger.error(f"❌ Background login error: {str(e)}")
+        logger.error(f"Background login error: {str(e)}")
         login_status["completed"] = True
         login_status["result"] = {"success": False, "error": str(e)}
         login_status["in_progress"] = False
 
 # ============================================
-# SEND COOKIES TO VERCEL
-# ============================================
-
-def send_cookies_to_vercel(cookies, username=None):
-    """Send extracted cookies to Vercel webhook"""
-    if not VERCEL_WEBHOOK_URL:
-        logger.warning("⚠️ VERCEL_WEBHOOK_URL not set, skipping")
-        return
-    
-    try:
-        logger.info(f"📤 Sending {len(cookies)} cookies to Vercel...")
-        
-        # Get username from cookies if not provided
-        if not username:
-            for cookie in cookies:
-                if cookie.get('name') == 'ds_user_id':
-                    username = cookie.get('value')
-                    break
-        
-        response = requests.post(
-            VERCEL_WEBHOOK_URL,
-            json={
-                "cookies": cookies,
-                "username": username or "Instagram User",
-                "timestamp": datetime.now().isoformat()
-            },
-            headers={"Content-Type": "application/json"},
-            timeout=30
-        )
-        
-        if response.status_code == 200:
-            logger.info("✅ Cookies sent to Vercel successfully")
-        else:
-            logger.warning(f"⚠️ Vercel responded with: {response.status_code}")
-            
-    except Exception as e:
-        logger.error(f"❌ Failed to send cookies to Vercel: {e}")
-
-# ============================================
-# API ENDPOINTS (for Vercel compatibility)
+# VERCEL API ENDPOINTS (for compatibility)
 # ============================================
 
 @app.route('/api/extract', methods=['POST'])
@@ -1053,7 +978,6 @@ def api_refresh():
                 session_data = json.load(f)
             cookies = session_data.get('cookies', [])
             if cookies:
-                # Refresh by sending existing cookies to Vercel
                 send_cookies_to_vercel(cookies, session_data.get('username'))
                 return jsonify({
                     "success": True,
@@ -1064,41 +988,20 @@ def api_refresh():
         except:
             pass
     
-    # If no session, try to create one
-    if INSTAGRAM_USERNAME and INSTAGRAM_PASSWORD:
-        logger.info("🔄 No session found, attempting to create new profile...")
-        return jsonify({
-            "success": False,
-            "message": "Please login first using the web interface",
-            "login_url": "/"
-        }), 403
-    else:
-        return jsonify({
-            "success": False,
-            "error": "No session and no credentials configured"
-        }), 404
-
-@app.route('/health')
-def health():
     return jsonify({
-        "status": "healthy",
-        "timestamp": datetime.now().isoformat(),
-        "browserless_configured": bool(BROWSERLESS_TOKEN),
-        "profile": PROFILE_NAME,
-        "session_exists": os.path.exists('session.json'),
-        "vercel_webhook_configured": bool(VERCEL_WEBHOOK_URL),
-        "instagram_credentials_configured": bool(INSTAGRAM_USERNAME and INSTAGRAM_PASSWORD)
-    })
+        "success": False,
+        "error": "No session found. Please login first using the web interface.",
+        "login_url": "/"
+    }), 404
 
 # ============================================
 # MAIN
 # ============================================
 
 if __name__ == "__main__":
-    port = int(os.environ.get('PORT', 5000))
-    logger.info(f"🚀 Starting Cookie Extractor on port {port}")
+    port = int(os.environ.get('PORT', 10000))
+    logger.info(f"🚀 Starting server on port {port}")
     logger.info(f"📂 Profile: {PROFILE_NAME}")
     logger.info(f"🔑 Token: {BROWSERLESS_TOKEN[:10]}..." if BROWSERLESS_TOKEN else "❌ No token")
-    logger.info(f"📤 Vercel webhook: {VERCEL_WEBHOOK_URL or 'Not configured'}")
-    logger.info(f"🔐 Instagram credentials: {'Configured ✓' if INSTAGRAM_USERNAME and INSTAGRAM_PASSWORD else 'Not configured'}")
+    logger.info(f"👤 Username: {USERNAME}")
     app.run(host='0.0.0.0', port=port, debug=False)
