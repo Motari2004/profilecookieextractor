@@ -24,6 +24,9 @@ BROWSERLESS_TOKEN = os.environ.get('BROWSERLESS_API_KEY', '2V9phNVcUGlxvJJ9154e1
 BROWSERLESS_ORIGIN = 'https://production-sfo.browserless.io'
 PROFILE_NAME = os.environ.get('PROFILE_NAME', 'instagram-login')
 
+# Vercel webhook URL for sending cookies back
+VERCEL_WEBHOOK_URL = os.environ.get('VERCEL_WEBHOOK_URL', 'https://fetchgram-one.vercel.app/api/cookies/sync')
+
 # ============================================
 # HTML UI
 # ============================================
@@ -40,7 +43,7 @@ HTML_TEMPLATE = '''
             background: #fafafa;
             padding: 20px;
         }
-        .container { max-width: 600px; margin: 0 auto; }
+        .container { max-width: 700px; margin: 0 auto; }
         h1 { color: #262626; margin-bottom: 20px; }
         .card {
             background: white;
@@ -62,6 +65,8 @@ HTML_TEMPLATE = '''
         .btn-primary:hover { background: #0077cc; }
         .btn-success { background: #28a745; }
         .btn-success:hover { background: #218838; }
+        .btn-warning { background: #ffc107; color: #212529; }
+        .btn-warning:hover { background: #e0a800; }
         .btn-danger { background: #ed4956; }
         .btn-danger:hover { background: #c43a46; }
         .btn:disabled { opacity: 0.5; cursor: not-allowed; }
@@ -122,11 +127,12 @@ HTML_TEMPLATE = '''
         <h1>🍪 Instagram Cookie Extractor</h1>
         
         <div class="card">
-            <h3>Extract Cookies from Browserless</h3>
+            <h3>Extract & Refresh Cookies</h3>
             <p style="color: #8e8e8e; margin: 10px 0;">
-                This will extract cookies from your Browserless profile and return them as JSON.
+                Extract cookies from Browserless profile or refresh the profile with new cookies.
             </p>
             <button id="extractBtn" class="btn btn-primary" onclick="extractCookies()">🍪 Extract Cookies</button>
+            <button id="refreshBtn" class="btn btn-warning" onclick="refreshProfile()" style="margin-left: 10px;">🔄 Refresh Profile</button>
             <button class="btn btn-danger" onclick="clearLogs()" style="margin-left: 10px;">🗑️ Clear Logs</button>
             
             <div id="status" style="display: none;" class="status"></div>
@@ -149,6 +155,7 @@ HTML_TEMPLATE = '''
                 <p style="color: #8e8e8e; font-size: 14px;">No cookies extracted yet.</p>
             </div>
             <button class="btn btn-success" onclick="copyCookies()" style="margin-top: 10px;">📋 Copy All Cookies</button>
+            <button class="btn btn-primary" onclick="sendToVercel()" style="margin-top: 10px; margin-left: 10px;">📤 Send to Vercel</button>
         </div>
         
         <div class="card">
@@ -210,7 +217,6 @@ HTML_TEMPLATE = '''
                     updateConnectionStatus('✅ Connected');
                     renderCookies(extractedCookies);
                     
-                    // Show success message
                     if (data.message) {
                         addLog(`📝 ${data.message}`, 'info');
                     }
@@ -226,6 +232,48 @@ HTML_TEMPLATE = '''
             } finally {
                 btn.disabled = false;
                 btn.textContent = '🍪 Extract Cookies';
+            }
+        }
+        
+        async function refreshProfile() {
+            const btn = document.getElementById('refreshBtn');
+            btn.disabled = true;
+            btn.textContent = '⏳ Refreshing...';
+            addLog('🔄 Starting profile refresh...', 'info');
+            updateConnectionStatus('🔄 Refreshing...');
+            updateStatus('⏳ Refreshing Browserless profile...', 'info');
+            
+            try {
+                const response = await fetch('/api/refresh', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' }
+                });
+                
+                const data = await response.json();
+                console.log('Refresh response:', data);
+                
+                if (data.success) {
+                    extractedCookies = data.cookies || [];
+                    addLog(`✅ Profile refreshed! ${extractedCookies.length} cookies updated.`, 'success');
+                    updateStatus(`✅ Profile refreshed with ${extractedCookies.length} cookies!`, 'success');
+                    updateConnectionStatus('✅ Refreshed');
+                    renderCookies(extractedCookies);
+                    
+                    if (data.message) {
+                        addLog(`📝 ${data.message}`, 'info');
+                    }
+                } else {
+                    addLog(`❌ Refresh failed: ${data.error || 'Unknown error'}`, 'error');
+                    updateStatus(`❌ ${data.error || 'Failed to refresh profile'}`, 'error');
+                    updateConnectionStatus('❌ Failed');
+                }
+            } catch (error) {
+                addLog(`❌ Error: ${error.message}`, 'error');
+                updateStatus(`❌ Error: ${error.message}`, 'error');
+                updateConnectionStatus('❌ Error');
+            } finally {
+                btn.disabled = false;
+                btn.textContent = '🔄 Refresh Profile';
             }
         }
         
@@ -263,7 +311,6 @@ HTML_TEMPLATE = '''
                 addLog('📋 Cookies copied to clipboard!', 'success');
                 updateStatus('📋 Cookies copied to clipboard!', 'success');
             }).catch(() => {
-                // Fallback
                 const textarea = document.createElement('textarea');
                 textarea.value = json;
                 document.body.appendChild(textarea);
@@ -273,6 +320,33 @@ HTML_TEMPLATE = '''
                 addLog('📋 Cookies copied to clipboard!', 'success');
                 updateStatus('📋 Cookies copied to clipboard!', 'success');
             });
+        }
+        
+        async function sendToVercel() {
+            if (!extractedCookies || extractedCookies.length === 0) {
+                alert('No cookies to send. Extract cookies first.');
+                return;
+            }
+            
+            try {
+                const response = await fetch('/api/send-to-vercel', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ cookies: extractedCookies })
+                });
+                
+                const data = await response.json();
+                if (data.success) {
+                    addLog('✅ Cookies sent to Vercel!', 'success');
+                    updateStatus('✅ Cookies sent to Vercel!', 'success');
+                } else {
+                    addLog(`❌ Failed to send to Vercel: ${data.error}`, 'error');
+                    updateStatus(`❌ Failed to send to Vercel: ${data.error}`, 'error');
+                }
+            } catch (error) {
+                addLog(`❌ Error sending to Vercel: ${error.message}`, 'error');
+                updateStatus(`❌ Error sending to Vercel: ${error.message}`, 'error');
+            }
         }
         
         function clearLogs() {
@@ -303,14 +377,14 @@ def extract_cookies_from_browserless():
             # Try to connect with profile
             try:
                 browser = p.chromium.connect_over_cdp(
-                    f"wss://production-sfo.browserless.io?token={BROWSERLESS_TOKEN}&profile={PROFILE_NAME}"
+                    f"wss://{BROWSERLESS_ORIGIN.replace('https://', '')}?token={BROWSERLESS_TOKEN}&profile={PROFILE_NAME}"
                 )
                 logger.info(f"✅ Connected with profile: {PROFILE_NAME}")
             except Exception as e:
                 logger.warning(f"⚠️ Profile connection failed: {e}")
                 # Try without profile
                 browser = p.chromium.connect_over_cdp(
-                    f"wss://production-sfo.browserless.io?token={BROWSERLESS_TOKEN}"
+                    f"wss://{BROWSERLESS_ORIGIN.replace('https://', '')}?token={BROWSERLESS_TOKEN}"
                 )
                 logger.info("✅ Connected without profile")
             
@@ -341,6 +415,145 @@ def extract_cookies_from_browserless():
         return {"success": False, "error": str(e)}
 
 # ============================================
+# REFRESH BROWSERLESS PROFILE
+# ============================================
+
+def refresh_browserless_profile():
+    """
+    Refresh the Browserless profile using the refresh endpoint.
+    This updates the profile's cookies without launching a browser.
+    """
+    logger.info("🔄 Refreshing Browserless profile...")
+    
+    if not BROWSERLESS_TOKEN:
+        logger.error("❌ BROWSERLESS_API_KEY not set")
+        return {"success": False, "error": "BROWSERLESS_API_KEY not set"}
+    
+    try:
+        # Step 1: Extract fresh cookies
+        extract_result = extract_cookies_from_browserless()
+        if not extract_result.get('success'):
+            return extract_result
+        
+        cookies = extract_result.get('cookies', [])
+        logger.info(f"✅ Extracted {len(cookies)} fresh cookies")
+        
+        # Step 2: Format cookies for Browserless refresh endpoint
+        formatted_cookies = []
+        for cookie in cookies:
+            formatted_cookies.append({
+                "name": cookie.get('name', ''),
+                "value": cookie.get('value', ''),
+                "domain": cookie.get('domain', '.instagram.com'),
+                "path": cookie.get('path', '/'),
+                "expires": cookie.get('expirationDate', -1),
+                "httpOnly": cookie.get('httpOnly', False),
+                "secure": cookie.get('secure', False),
+                "session": cookie.get('session', True)
+            })
+        
+        # Step 3: Send refresh request to Browserless
+        refresh_url = f"{BROWSERLESS_ORIGIN}/profile/refresh?token={BROWSERLESS_TOKEN}"
+        
+        refresh_payload = {
+            "name": PROFILE_NAME,
+            "state": {
+                "cookies": formatted_cookies
+            }
+        }
+        
+        logger.info(f"📤 Sending refresh request to Browserless...")
+        
+        response = requests.post(
+            refresh_url,
+            json=refresh_payload,
+            headers={"Content-Type": "application/json"},
+            timeout=30
+        )
+        
+        if response.status_code == 200:
+            logger.info("✅ Browserless profile refreshed successfully!")
+            
+            # Also send cookies to Vercel
+            send_cookies_to_vercel(cookies)
+            
+            return {
+                "success": True,
+                "message": f"Profile '{PROFILE_NAME}' refreshed with {len(cookies)} cookies",
+                "cookies": cookies,
+                "count": len(cookies)
+            }
+        elif response.status_code == 404:
+            logger.warning("⚠️ Profile not found, creating new profile...")
+            
+            # Create new profile
+            create_url = f"{BROWSERLESS_ORIGIN}/profile/create?token={BROWSERLESS_TOKEN}"
+            create_response = requests.post(
+                create_url,
+                json=refresh_payload,
+                headers={"Content-Type": "application/json"},
+                timeout=30
+            )
+            
+            if create_response.status_code in [200, 201]:
+                logger.info(f"✅ Browserless profile created: {PROFILE_NAME}")
+                send_cookies_to_vercel(cookies)
+                return {
+                    "success": True,
+                    "message": f"Profile '{PROFILE_NAME}' created with {len(cookies)} cookies",
+                    "cookies": cookies,
+                    "count": len(cookies)
+                }
+            else:
+                return {"success": False, "error": f"Profile creation failed: {create_response.status_code}"}
+        else:
+            logger.error(f"❌ Refresh failed: {response.status_code} - {response.text}")
+            return {"success": False, "error": f"Refresh failed: {response.status_code}"}
+            
+    except Exception as e:
+        logger.error(f"❌ Refresh error: {e}")
+        return {"success": False, "error": str(e)}
+
+# ============================================
+# SEND COOKIES TO VERCEL
+# ============================================
+
+def send_cookies_to_vercel(cookies):
+    """Send extracted cookies to Vercel webhook"""
+    if not VERCEL_WEBHOOK_URL:
+        logger.warning("⚠️ VERCEL_WEBHOOK_URL not set, skipping")
+        return
+    
+    try:
+        logger.info(f"📤 Sending {len(cookies)} cookies to Vercel...")
+        
+        # Get username from cookies
+        username = None
+        for cookie in cookies:
+            if cookie.get('name') == 'ds_user_id':
+                username = cookie.get('value')
+                break
+        
+        response = requests.post(
+            VERCEL_WEBHOOK_URL,
+            json={
+                "cookies": cookies,
+                "username": username or "Instagram User",
+                "timestamp": datetime.now().isoformat()
+            },
+            headers={"Content-Type": "application/json"},
+            timeout=30
+        )
+        
+        if response.status_code == 200:
+            logger.info("✅ Cookies sent to Vercel successfully")
+        else:
+            logger.warning(f"⚠️ Vercel responded with: {response.status_code}")
+            
+    except Exception as e:
+        logger.error(f"❌ Failed to send cookies to Vercel: {e}")
+
+# ============================================
 # ROUTES
 # ============================================
 
@@ -354,12 +567,32 @@ def api_extract():
     result = extract_cookies_from_browserless()
     return jsonify(result)
 
+@app.route('/api/refresh', methods=['POST'])
+def api_refresh():
+    """API endpoint to refresh Browserless profile"""
+    result = refresh_browserless_profile()
+    return jsonify(result)
+
+@app.route('/api/send-to-vercel', methods=['POST'])
+def api_send_to_vercel():
+    """API endpoint to send cookies to Vercel"""
+    data = request.get_json(silent=True) or {}
+    cookies = data.get('cookies', [])
+    
+    if not cookies:
+        return jsonify({"success": False, "error": "No cookies provided"})
+    
+    send_cookies_to_vercel(cookies)
+    return jsonify({"success": True, "message": f"Sent {len(cookies)} cookies to Vercel"})
+
 @app.route('/health')
 def health():
     return jsonify({
         "status": "healthy",
         "timestamp": datetime.now().isoformat(),
-        "browserless_configured": bool(BROWSERLESS_TOKEN)
+        "browserless_configured": bool(BROWSERLESS_TOKEN),
+        "profile": PROFILE_NAME,
+        "vercel_webhook_configured": bool(VERCEL_WEBHOOK_URL)
     })
 
 # ============================================
@@ -371,4 +604,5 @@ if __name__ == "__main__":
     logger.info(f"🚀 Starting Cookie Extractor on port {port}")
     logger.info(f"📂 Profile: {PROFILE_NAME}")
     logger.info(f"🔑 Token: {BROWSERLESS_TOKEN[:10]}..." if BROWSERLESS_TOKEN else "❌ No token")
+    logger.info(f"📤 Vercel webhook: {VERCEL_WEBHOOK_URL or 'Not configured'}")
     app.run(host='0.0.0.0', port=port, debug=False)
