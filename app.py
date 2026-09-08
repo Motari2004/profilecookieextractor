@@ -220,6 +220,9 @@ HTML_TEMPLATE = '''
                     if (data.message) {
                         addLog(`📝 ${data.message}`, 'info');
                     }
+                    if (data.refresh_status) {
+                        addLog(`🔄 Profile refresh: ${data.refresh_status}`, 'info');
+                    }
                 } else {
                     addLog(`❌ Failed: ${data.error || 'Unknown error'}`, 'error');
                     updateStatus(`❌ ${data.error || 'Failed to extract cookies'}`, 'error');
@@ -362,8 +365,81 @@ HTML_TEMPLATE = '''
 # EXTRACT COOKIES FROM BROWSERLESS
 # ============================================
 
+def refresh_browserless_profile_with_cookies(cookies):
+    """
+    Refresh the Browserless profile with the given cookies.
+    """
+    logger.info("🔄 Refreshing Browserless profile with cookies...")
+    
+    if not BROWSERLESS_TOKEN:
+        logger.error("❌ BROWSERLESS_API_KEY not set")
+        return False
+    
+    try:
+        # Format cookies for Browserless refresh endpoint
+        formatted_cookies = []
+        for cookie in cookies:
+            formatted_cookies.append({
+                "name": cookie.get('name', ''),
+                "value": cookie.get('value', ''),
+                "domain": cookie.get('domain', '.instagram.com'),
+                "path": cookie.get('path', '/'),
+                "expires": cookie.get('expirationDate', -1),
+                "httpOnly": cookie.get('httpOnly', False),
+                "secure": cookie.get('secure', False),
+                "session": cookie.get('session', True)
+            })
+        
+        refresh_payload = {
+            "name": PROFILE_NAME,
+            "state": {
+                "cookies": formatted_cookies
+            }
+        }
+        
+        refresh_url = f"{BROWSERLESS_ORIGIN}/profile/refresh?token={BROWSERLESS_TOKEN}"
+        
+        logger.info(f"📤 Sending refresh request to Browserless...")
+        
+        response = requests.post(
+            refresh_url,
+            json=refresh_payload,
+            headers={"Content-Type": "application/json"},
+            timeout=30
+        )
+        
+        if response.status_code == 200:
+            logger.info("✅ Browserless profile refreshed successfully!")
+            return True
+        elif response.status_code == 404:
+            logger.warning("⚠️ Profile not found, creating new profile...")
+            
+            # Create new profile
+            create_url = f"{BROWSERLESS_ORIGIN}/profile/create?token={BROWSERLESS_TOKEN}"
+            create_response = requests.post(
+                create_url,
+                json=refresh_payload,
+                headers={"Content-Type": "application/json"},
+                timeout=30
+            )
+            
+            if create_response.status_code in [200, 201]:
+                logger.info(f"✅ Browserless profile created: {PROFILE_NAME}")
+                return True
+            else:
+                logger.error(f"❌ Profile creation failed: {create_response.status_code}")
+                return False
+        else:
+            logger.error(f"❌ Refresh failed: {response.status_code} - {response.text}")
+            return False
+            
+    except Exception as e:
+        logger.error(f"❌ Refresh error: {e}")
+        return False
+
+
 def extract_cookies_from_browserless():
-    """Extract cookies from Browserless profile"""
+    """Extract cookies from Browserless profile and refresh the profile"""
     logger.info("🍪 Starting cookie extraction...")
     
     if not BROWSERLESS_TOKEN:
@@ -408,7 +484,26 @@ def extract_cookies_from_browserless():
             logger.info(f"✅ Extracted {len(cookies)} cookies")
             
             browser.close()
-            return {"success": True, "cookies": cookies, "count": len(cookies)}
+            
+            # 🔥 IMPORTANT: Refresh the Browserless profile with new cookies
+            refresh_success = False
+            if cookies:
+                refresh_success = refresh_browserless_profile_with_cookies(cookies)
+                if refresh_success:
+                    logger.info("✅ Browserless profile refreshed with new cookies")
+                else:
+                    logger.warning("⚠️ Failed to refresh Browserless profile, but cookies were extracted")
+            
+            # Send cookies to Vercel
+            if cookies:
+                send_cookies_to_vercel(cookies)
+            
+            return {
+                "success": True,
+                "cookies": cookies,
+                "count": len(cookies),
+                "refresh_status": "refreshed" if refresh_success else "failed"
+            }
             
     except Exception as e:
         logger.error(f"❌ Error: {e}")
@@ -563,7 +658,7 @@ def index():
 
 @app.route('/api/extract', methods=['POST'])
 def api_extract():
-    """API endpoint to extract cookies"""
+    """API endpoint to extract cookies and refresh profile"""
     result = extract_cookies_from_browserless()
     return jsonify(result)
 
