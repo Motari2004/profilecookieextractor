@@ -4,8 +4,13 @@ import logging
 import os
 import json
 import time
-from datetime import datetime
 import requests
+from datetime import datetime
+import threading
+import queue
+
+from dotenv import load_dotenv
+load_dotenv()
 
 app = Flask(__name__)
 
@@ -31,6 +36,20 @@ INSTAGRAM_PASSWORD = os.environ.get('INSTAGRAM_PASSWORD', '')
 # Vercel webhook URL for sending cookies back
 VERCEL_WEBHOOK_URL = os.environ.get('VERCEL_WEBHOOK_URL', 'https://fetchgram-one.vercel.app/api/cookies/sync')
 
+# 2FA queue for communication between threads
+twofa_queue = queue.Queue()
+
+# Store login status
+login_status = {
+    "in_progress": False,
+    "completed": False,
+    "result": None,
+    "start_time": None,
+    "end_time": None,
+    "error": None,
+    "awaiting_2fa": False
+}
+
 # ============================================
 # HTML UI
 # ============================================
@@ -39,7 +58,9 @@ HTML_TEMPLATE = '''
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Instagram Cookie Extractor</title>
+    <title>Instagram Login Bot</title>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body {
@@ -47,14 +68,41 @@ HTML_TEMPLATE = '''
             background: #fafafa;
             padding: 20px;
         }
-        .container { max-width: 700px; margin: 0 auto; }
-        h1 { color: #262626; margin-bottom: 20px; }
-        .card {
+        .container { max-width: 800px; margin: 0 auto; }
+        h1 { color: #262626; margin-bottom: 20px; font-weight: 300; }
+        
+        .controls {
             background: white;
             padding: 20px;
             border-radius: 8px;
             box-shadow: 0 1px 3px rgba(0,0,0,0.1);
             margin-bottom: 20px;
+        }
+        .form-group {
+            margin-bottom: 15px;
+        }
+        .form-group label {
+            display: block;
+            font-size: 14px;
+            font-weight: 600;
+            color: #262626;
+            margin-bottom: 5px;
+        }
+        .form-group input {
+            width: 100%;
+            padding: 10px;
+            border: 1px solid #dbdbdb;
+            border-radius: 4px;
+            font-size: 14px;
+        }
+        .form-group input:focus {
+            border-color: #0095f6;
+            outline: none;
+        }
+        .form-row {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 15px;
         }
         .btn {
             padding: 10px 20px;
@@ -63,115 +111,352 @@ HTML_TEMPLATE = '''
             font-size: 14px;
             cursor: pointer;
             font-weight: 600;
-            color: white;
         }
-        .btn-primary { background: #0095f6; }
+        .btn-primary { background: #0095f6; color: white; width: 100%; }
         .btn-primary:hover { background: #0077cc; }
-        .btn-success { background: #28a745; }
+        .btn-primary:disabled { opacity: 0.5; cursor: not-allowed; }
+        .btn-success { background: #28a745; color: white; width: 100%; }
         .btn-success:hover { background: #218838; }
-        .btn-warning { background: #ffc107; color: #212529; }
-        .btn-warning:hover { background: #e0a800; }
-        .btn-danger { background: #ed4956; }
-        .btn-danger:hover { background: #c43a46; }
-        .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+        .btn-secondary { background: #dbdbdb; color: #262626; }
+        .btn-secondary:hover { background: #c4c4c4; }
+        
         .status {
             padding: 12px 16px;
             border-radius: 4px;
+            font-size: 14px;
+            font-weight: 500;
             margin-top: 15px;
         }
-        .status-info { background: #cce5ff; color: #004085; }
+        .status-idle { background: #efefef; color: #8e8e8e; }
+        .status-running { background: #fff3cd; color: #856404; animation: pulse 1s infinite; }
         .status-success { background: #d4edda; color: #155724; }
         .status-error { background: #f8d7da; color: #721c24; }
+        .status-2fa { background: #cce5ff; color: #004085; animation: pulse 1s infinite; }
+        
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.6; }
+        }
+        
+        .info-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+            gap: 15px;
+            margin-top: 20px;
+        }
+        .info-card {
+            background: white;
+            padding: 15px;
+            border-radius: 8px;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+        }
+        .info-card .label {
+            font-size: 12px;
+            color: #8e8e8e;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+        .info-card .value {
+            font-size: 16px;
+            font-weight: 600;
+            color: #262626;
+            margin-top: 5px;
+            word-break: break-all;
+        }
+        
         .log-container {
             background: #1e1e1e;
             color: #d4d4d4;
             padding: 15px;
             border-radius: 8px;
-            max-height: 400px;
+            margin-top: 20px;
+            max-height: 300px;
             overflow-y: auto;
             font-family: 'Courier New', monospace;
             font-size: 12px;
             line-height: 1.6;
-            margin-top: 15px;
         }
         .log-entry .time { color: #569cd6; margin-right: 10px; }
-        .log-entry .success { color: #4ec9b0; }
-        .log-entry .error { color: #f44747; }
-        .log-entry .warning { color: #dcdcaa; }
         .log-entry .info { color: #4ec9b0; }
-        .info-grid {
-            display: grid;
-            grid-template-columns: 1fr 1fr;
-            gap: 10px;
-            margin-top: 10px;
-        }
-        .info-item {
-            background: #f8f9fa;
-            padding: 10px;
+        .log-entry .error { color: #f44747; }
+        .log-entry .success { color: #4ec9b0; }
+        .log-entry .warning { color: #dcdcaa; }
+        .log-entry .highlight { color: #dcdcaa; font-weight: bold; }
+        
+        .error-box {
+            background: #f8d7da;
+            color: #721c24;
+            padding: 15px;
             border-radius: 4px;
+            margin-top: 15px;
+            border: 1px solid #f5c6cb;
         }
-        .info-item .label { font-size: 11px; color: #8e8e8e; }
-        .info-item .value { font-size: 16px; font-weight: 600; color: #262626; }
-        .cookie-list {
-            max-height: 300px;
-            overflow-y: auto;
-            margin-top: 10px;
+        .error-box strong { display: block; margin-bottom: 5px; }
+        
+        .twofa-box {
+            background: #cce5ff;
+            color: #004085;
+            padding: 15px;
+            border-radius: 4px;
+            margin-top: 15px;
+            border: 1px solid #b8daff;
+            display: none;
         }
-        .cookie-item {
-            padding: 6px 10px;
-            border-bottom: 1px solid #efefef;
-            font-size: 13px;
+        .twofa-box strong { display: block; margin-bottom: 10px; }
+        .twofa-box .form-group { margin-bottom: 10px; }
+        .twofa-box .form-group input { 
+            font-size: 24px; 
+            letter-spacing: 5px;
+            text-align: center;
+            max-width: 200px;
         }
-        .cookie-item .name { font-weight: 600; color: #262626; }
-        .cookie-item .value { color: #8e8e8e; }
+        
+        @media (max-width: 600px) {
+            .form-row { grid-template-columns: 1fr; }
+        }
     </style>
 </head>
 <body>
     <div class="container">
-        <h1>🍪 Instagram Cookie Extractor</h1>
+        <h1>📸 Instagram Login Bot</h1>
         
-        <div class="card">
-            <h3>Extract & Refresh Cookies</h3>
-            <p style="color: #8e8e8e; margin: 10px 0;">
-                Extract cookies from Browserless profile or refresh the profile with new cookies.
-            </p>
-            <button id="extractBtn" class="btn btn-primary" onclick="extractCookies()">🍪 Extract Cookies</button>
-            <button id="refreshBtn" class="btn btn-warning" onclick="refreshProfile()" style="margin-left: 10px;">🔄 Refresh Profile</button>
-            <button class="btn btn-danger" onclick="clearLogs()" style="margin-left: 10px;">🗑️ Clear Logs</button>
-            
-            <div id="status" style="display: none;" class="status"></div>
-            
-            <div class="info-grid">
-                <div class="info-item">
-                    <div class="label">Profile</div>
-                    <div class="value" id="profileName">instagram-login</div>
+        <div class="controls">
+            <div class="form-row">
+                <div class="form-group">
+                    <label>Username</label>
+                    <input type="text" id="username" value="{{ username }}" readonly>
                 </div>
-                <div class="info-item">
-                    <div class="label">Status</div>
-                    <div class="value" id="connectionStatus">⏳ Ready</div>
+                <div class="form-group">
+                    <label>Password</label>
+                    <input type="password" id="password" placeholder="Enter your Instagram password">
                 </div>
+            </div>
+            <button class="btn btn-primary" onclick="startLogin()" id="loginBtn">🚀 Start Login</button>
+            
+            <div id="twofaBox" class="twofa-box">
+                <strong>🔐 2FA Required</strong>
+                <p>Please enter your 6-digit authentication code:</p>
+                <div class="form-group">
+                    <input type="text" id="twofaInput" placeholder="Enter 6-digit code" maxlength="6" inputmode="numeric" pattern="[0-9]*">
+                </div>
+                <button class="btn btn-success" onclick="submit2FA()" id="twofaBtn">✅ Submit 2FA Code</button>
+            </div>
+            
+            <div id="status" class="status status-idle">⏸ Ready</div>
+        </div>
+        
+        <div class="info-grid">
+            <div class="info-card">
+                <div class="label">Browser</div>
+                <div class="value">🔗 Browserless</div>
+            </div>
+            <div class="info-card">
+                <div class="label">Status</div>
+                <div class="value" id="loginStatusText">Not logged in</div>
+            </div>
+            <div class="info-card">
+                <div class="label">Session</div>
+                <div class="value" id="sessionStatus">-</div>
             </div>
         </div>
         
-        <div class="card">
-            <h3>📋 Extracted Cookies</h3>
-            <div id="cookieList">
-                <p style="color: #8e8e8e; font-size: 14px;">No cookies extracted yet.</p>
-            </div>
-            <button class="btn btn-success" onclick="copyCookies()" style="margin-top: 10px;">📋 Copy All Cookies</button>
-            <button class="btn btn-primary" onclick="sendToVercel()" style="margin-top: 10px; margin-left: 10px;">📤 Send to Vercel</button>
+        <div id="errorBox" style="display:none;"></div>
+        
+        <div id="logContainer" class="log-container">
+            <div class="log-entry"><span class="time">[System]</span><span class="info">Ready. Enter your password and click "Start Login".</span></div>
         </div>
         
-        <div class="card">
-            <h3>📝 Logs</h3>
-            <div id="logContainer" class="log-container">
-                <div class="log-entry"><span class="time">[System]</span><span class="info">Ready. Click "Extract Cookies" to begin.</span></div>
-            </div>
+        <div style="margin-top: 10px; display: flex; gap: 10px;">
+            <button class="btn btn-secondary" onclick="refreshStatus()" style="flex:1;">🔄 Refresh</button>
+            <button class="btn btn-secondary" onclick="clearSession()" style="flex:1;">🗑️ Clear Session</button>
         </div>
     </div>
 
     <script>
-        let extractedCookies = [];
+        let isRefreshing = false;
+        let checkInterval = null;
+        
+        async function startLogin() {
+            const btn = document.getElementById('loginBtn');
+            const password = document.getElementById('password').value;
+            const username = document.getElementById('username').value;
+            
+            if (!password) {
+                alert('Please enter your password');
+                return;
+            }
+            
+            btn.disabled = true;
+            btn.textContent = '⏳ Logging in...';
+            hideError();
+            hide2FA();
+            
+            try {
+                const response = await fetch('/login', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        username: username,
+                        password: password
+                    })
+                });
+                const data = await response.json();
+                if (data.success) {
+                    updateStatus('running', '🔄 Login in progress...');
+                    addLog('Login started successfully', 'info');
+                    if (checkInterval) clearInterval(checkInterval);
+                    checkInterval = setInterval(checkFor2FA, 2000);
+                } else {
+                    updateStatus('error', '❌ Failed: ' + (data.message || data.error || 'Unknown error'));
+                    addLog('Error: ' + (data.message || data.error || 'Unknown error'), 'error');
+                    showError(data.message || data.error || 'Unknown error');
+                }
+            } catch (error) {
+                updateStatus('error', '❌ Error: ' + error.message);
+                addLog('Error: ' + error.message, 'error');
+                showError(error.message);
+            }
+            
+            btn.disabled = false;
+            btn.textContent = '🚀 Start Login';
+            setTimeout(refreshStatus, 2000);
+        }
+        
+        async function checkFor2FA() {
+            try {
+                const response = await fetch('/status');
+                const data = await response.json();
+                
+                if (data.login_status && data.login_status.awaiting_2fa) {
+                    clearInterval(checkInterval);
+                    show2FA();
+                    updateStatus('2fa', '🔐 2FA Required - Please enter your code');
+                    addLog('🔐 2FA page detected! Please enter your authentication code.', 'highlight');
+                }
+            } catch (error) {
+                console.error('Check for 2FA error:', error);
+            }
+        }
+        
+        async function submit2FA() {
+            const code = document.getElementById('twofaInput').value.trim();
+            
+            if (!code || code.length < 6) {
+                alert('Please enter a valid 6-digit code');
+                return;
+            }
+            
+            const btn = document.getElementById('twofaBtn');
+            btn.disabled = true;
+            btn.textContent = '⏳ Submitting...';
+            
+            try {
+                const response = await fetch('/submit_2fa', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ code: code })
+                });
+                const data = await response.json();
+                if (data.success) {
+                    hide2FA();
+                    updateStatus('running', '🔄 2FA submitted, waiting for response...');
+                    addLog('✅ 2FA code submitted', 'success');
+                    
+                    // Check result after 2FA
+                    setTimeout(async () => {
+                        const result = await fetch('/result');
+                        const resultData = await result.json();
+                        if (resultData.success) {
+                            updateStatus('success', '✅ Login successful!');
+                            addLog('✅ Login completed successfully!', 'success');
+                            document.getElementById('loginStatusText').textContent = '✅ Logged in';
+                        } else {
+                            updateStatus('error', '❌ Login failed after 2FA');
+                            addLog('❌ Login failed after 2FA: ' + (resultData.error || 'Unknown error'), 'error');
+                        }
+                        refreshStatus();
+                    }, 10000);
+                } else {
+                    updateStatus('error', '❌ 2FA submission failed');
+                    addLog('❌ 2FA submission failed: ' + (data.error || 'Unknown error'), 'error');
+                    showError(data.error || '2FA submission failed');
+                }
+            } catch (error) {
+                updateStatus('error', '❌ Error: ' + error.message);
+                addLog('Error: ' + error.message, 'error');
+                showError(error.message);
+            }
+            
+            btn.disabled = false;
+            btn.textContent = '✅ Submit 2FA Code';
+        }
+        
+        function show2FA() {
+            document.getElementById('twofaBox').style.display = 'block';
+            document.getElementById('twofaInput').focus();
+        }
+        
+        function hide2FA() {
+            document.getElementById('twofaBox').style.display = 'none';
+            document.getElementById('twofaInput').value = '';
+        }
+        
+        async function refreshStatus() {
+            if (isRefreshing) return;
+            isRefreshing = true;
+            
+            try {
+                const response = await fetch('/status');
+                const data = await response.json();
+                
+                document.getElementById('loginStatusText').textContent = data.logged_in ? '✅ Logged in' : '❌ Not logged in';
+                document.getElementById('sessionStatus').textContent = data.session_exists ? '✅ Exists' : '❌ None';
+                
+                if (data.login_status && data.login_status.in_progress) {
+                    updateStatus('running', '🔄 Login in progress...');
+                } else if (data.login_status && data.login_status.completed) {
+                    const result = await fetch('/result');
+                    const resultData = await result.json();
+                    if (resultData.success) {
+                        updateStatus('success', '✅ Login successful!');
+                        addLog('✅ Login completed successfully!', 'success');
+                        document.getElementById('loginStatusText').textContent = '✅ Logged in';
+                    } else {
+                        updateStatus('error', '❌ Login failed');
+                        addLog('❌ Login failed: ' + (resultData.error || 'Unknown error'), 'error');
+                        showError(resultData.error || 'Login failed');
+                    }
+                } else if (data.logged_in) {
+                    updateStatus('success', '✅ Already logged in');
+                } else {
+                    updateStatus('idle', '⏸ Idle');
+                }
+            } catch (error) {
+                console.error('Refresh error:', error);
+            }
+            
+            isRefreshing = false;
+        }
+        
+        async function clearSession() {
+            if (!confirm('Clear saved session?')) return;
+            try {
+                const response = await fetch('/clear_session', { method: 'POST' });
+                const data = await response.json();
+                if (data.success) {
+                    addLog('✅ Session cleared', 'success');
+                    document.getElementById('sessionStatus').textContent = '❌ None';
+                }
+            } catch (error) {
+                addLog('Error clearing session: ' + error.message, 'error');
+            }
+        }
+        
+        function updateStatus(type, message) {
+            const el = document.getElementById('status');
+            el.className = 'status status-' + type;
+            el.textContent = message;
+        }
         
         function addLog(message, level = 'info') {
             const container = document.getElementById('logContainer');
@@ -181,428 +466,520 @@ HTML_TEMPLATE = '''
             entry.innerHTML = `<span class="time">[${time}]</span><span class="${level}">${message}</span>`;
             container.appendChild(entry);
             container.scrollTop = container.scrollHeight;
+            
             while (container.children.length > 100) {
                 container.removeChild(container.firstChild);
             }
         }
         
-        function updateStatus(message, type = 'info') {
-            const status = document.getElementById('status');
-            status.style.display = 'block';
-            status.className = `status status-${type}`;
-            status.textContent = message;
+        function showError(message) {
+            const box = document.getElementById('errorBox');
+            box.style.display = 'block';
+            box.className = 'error-box';
+            box.innerHTML = `<strong>❌ Error:</strong> ${message}`;
         }
         
-        function updateConnectionStatus(text) {
-            document.getElementById('connectionStatus').textContent = text;
+        function hideError() {
+            document.getElementById('errorBox').style.display = 'none';
         }
         
-        async function extractCookies() {
-            const btn = document.getElementById('extractBtn');
-            btn.disabled = true;
-            btn.textContent = '⏳ Extracting...';
-            addLog('🔍 Starting cookie extraction...', 'info');
-            updateConnectionStatus('🔄 Extracting...');
-            updateStatus('⏳ Extracting cookies from Browserless...', 'info');
-            
-            try {
-                const response = await fetch('/api/extract', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' }
-                });
-                
-                const data = await response.json();
-                console.log('Extract response:', data);
-                
-                if (data.success) {
-                    extractedCookies = data.cookies || [];
-                    addLog(`✅ Successfully extracted ${extractedCookies.length} cookies!`, 'success');
-                    updateStatus(`✅ Extracted ${extractedCookies.length} cookies successfully!`, 'success');
-                    updateConnectionStatus('✅ Connected');
-                    renderCookies(extractedCookies);
-                    
-                    if (data.message) {
-                        addLog(`📝 ${data.message}`, 'info');
-                    }
-                    if (data.refresh_status) {
-                        addLog(`🔄 Profile refresh: ${data.refresh_status}`, 'info');
-                    }
-                } else {
-                    addLog(`❌ Failed: ${data.error || 'Unknown error'}`, 'error');
-                    updateStatus(`❌ ${data.error || 'Failed to extract cookies'}`, 'error');
-                    updateConnectionStatus('❌ Failed');
-                }
-            } catch (error) {
-                addLog(`❌ Error: ${error.message}`, 'error');
-                updateStatus(`❌ Error: ${error.message}`, 'error');
-                updateConnectionStatus('❌ Error');
-            } finally {
-                btn.disabled = false;
-                btn.textContent = '🍪 Extract Cookies';
-            }
-        }
-        
-        async function refreshProfile() {
-            const btn = document.getElementById('refreshBtn');
-            btn.disabled = true;
-            btn.textContent = '⏳ Refreshing...';
-            addLog('🔄 Starting profile refresh...', 'info');
-            updateConnectionStatus('🔄 Refreshing...');
-            updateStatus('⏳ Refreshing Browserless profile...', 'info');
-            
-            try {
-                const response = await fetch('/api/refresh', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' }
-                });
-                
-                const data = await response.json();
-                console.log('Refresh response:', data);
-                
-                if (data.success) {
-                    extractedCookies = data.cookies || [];
-                    addLog(`✅ Profile refreshed! ${extractedCookies.length} cookies updated.`, 'success');
-                    updateStatus(`✅ Profile refreshed with ${extractedCookies.length} cookies!`, 'success');
-                    updateConnectionStatus('✅ Refreshed');
-                    renderCookies(extractedCookies);
-                    
-                    if (data.message) {
-                        addLog(`📝 ${data.message}`, 'info');
-                    }
-                } else {
-                    addLog(`❌ Refresh failed: ${data.error || 'Unknown error'}`, 'error');
-                    updateStatus(`❌ ${data.error || 'Failed to refresh profile'}`, 'error');
-                    updateConnectionStatus('❌ Failed');
-                }
-            } catch (error) {
-                addLog(`❌ Error: ${error.message}`, 'error');
-                updateStatus(`❌ Error: ${error.message}`, 'error');
-                updateConnectionStatus('❌ Error');
-            } finally {
-                btn.disabled = false;
-                btn.textContent = '🔄 Refresh Profile';
-            }
-        }
-        
-        function renderCookies(cookies) {
-            const container = document.getElementById('cookieList');
-            if (!cookies || cookies.length === 0) {
-                container.innerHTML = '<p style="color: #8e8e8e; font-size: 14px;">No cookies extracted.</p>';
-                return;
-            }
-            
-            let html = `<div class="cookie-list">`;
-            cookies.forEach((cookie, i) => {
-                const name = cookie.name || 'unknown';
-                const value = cookie.value ? cookie.value.substring(0, 50) + (cookie.value.length > 50 ? '...' : '') : '';
-                html += `
-                    <div class="cookie-item">
-                        <span class="name">#${i + 1}. ${name}</span>
-                        <span class="value">${value}</span>
-                    </div>
-                `;
-            });
-            html += `</div>`;
-            html += `<p style="margin-top: 10px; font-size: 13px; color: #8e8e8e;">Total: ${cookies.length} cookies</p>`;
-            container.innerHTML = html;
-        }
-        
-        function copyCookies() {
-            if (!extractedCookies || extractedCookies.length === 0) {
-                alert('No cookies to copy. Extract cookies first.');
-                return;
-            }
-            
-            const json = JSON.stringify(extractedCookies, null, 2);
-            navigator.clipboard.writeText(json).then(() => {
-                addLog('📋 Cookies copied to clipboard!', 'success');
-                updateStatus('📋 Cookies copied to clipboard!', 'success');
-            }).catch(() => {
-                const textarea = document.createElement('textarea');
-                textarea.value = json;
-                document.body.appendChild(textarea);
-                textarea.select();
-                document.execCommand('copy');
-                document.body.removeChild(textarea);
-                addLog('📋 Cookies copied to clipboard!', 'success');
-                updateStatus('📋 Cookies copied to clipboard!', 'success');
-            });
-        }
-        
-        async function sendToVercel() {
-            if (!extractedCookies || extractedCookies.length === 0) {
-                alert('No cookies to send. Extract cookies first.');
-                return;
-            }
-            
-            try {
-                const response = await fetch('/api/send-to-vercel', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ cookies: extractedCookies })
-                });
-                
-                const data = await response.json();
-                if (data.success) {
-                    addLog('✅ Cookies sent to Vercel!', 'success');
-                    updateStatus('✅ Cookies sent to Vercel!', 'success');
-                } else {
-                    addLog(`❌ Failed to send to Vercel: ${data.error}`, 'error');
-                    updateStatus(`❌ Failed to send to Vercel: ${data.error}`, 'error');
-                }
-            } catch (error) {
-                addLog(`❌ Error sending to Vercel: ${error.message}`, 'error');
-                updateStatus(`❌ Error sending to Vercel: ${error.message}`, 'error');
-            }
-        }
-        
-        function clearLogs() {
-            const container = document.getElementById('logContainer');
-            container.innerHTML = `<div class="log-entry"><span class="time">[System]</span><span class="info">Logs cleared.</span></div>`;
-        }
+        setInterval(refreshStatus, 3000);
+        setTimeout(refreshStatus, 500);
     </script>
 </body>
 </html>
 '''
 
 # ============================================
-# LOGIN TO INSTAGRAM
+# BROWSERLESS LOGIN WITH 2FA SUPPORT
 # ============================================
 
-def login_to_instagram(page):
-    """
-    Attempt to log in to Instagram using stored credentials.
-    """
-    logger.info("🔑 Attempting to log in to Instagram...")
-    
-    if not INSTAGRAM_USERNAME or not INSTAGRAM_PASSWORD:
-        logger.warning("⚠️ Instagram credentials not set in environment")
-        return False
-    
-    try:
-        # Wait for login form
-        page.wait_for_selector('input[name="username"]', timeout=10000)
-        
-        # Fill credentials
-        page.fill('input[name="username"]', INSTAGRAM_USERNAME)
-        page.fill('input[name="password"]', INSTAGRAM_PASSWORD)
-        
-        # Click login button
-        page.click('button[type="submit"]')
-        
-        # Wait for navigation
-        time.sleep(3)
-        page.wait_for_load_state("networkidle")
-        
-        # Check if login was successful
-        if "login" not in page.url:
-            logger.info("✅ Login successful!")
-            
-            # Handle "Save Info" prompt if it appears
-            try:
-                save_info = page.query_selector('button:has-text("Not Now")')
-                if save_info:
-                    save_info.click()
-                    time.sleep(1)
-            except:
-                pass
-            
-            # Handle "Turn On Notifications" prompt
-            try:
-                not_now = page.query_selector('button:has-text("Not Now")')
-                if not_now:
-                    not_now.click()
-                    time.sleep(1)
-            except:
-                pass
-            
-            return True
-        else:
-            logger.warning("⚠️ Login failed - may need 2FA or verification")
-            return False
-            
-    except Exception as e:
-        logger.error(f"❌ Login error: {e}")
-        return False
-
-# ============================================
-# CREATE NEW BROWSERLESS PROFILE
-# ============================================
-
-def create_new_browserless_profile():
-    """
-    Create a brand new Browserless profile with fresh Instagram login.
-    """
-    logger.info("🔄 Creating new Browserless profile...")
+def login_with_browserless(username, password):
+    """Login to Instagram using Browserless and handle 2FA"""
+    global login_status, twofa_queue
     
     if not BROWSERLESS_TOKEN:
-        logger.error("❌ BROWSERLESS_API_KEY not set")
         return {"success": False, "error": "BROWSERLESS_API_KEY not set"}
     
-    if not INSTAGRAM_USERNAME or not INSTAGRAM_PASSWORD:
-        logger.error("❌ Instagram credentials not set")
-        return {"success": False, "error": "Instagram credentials not set"}
-    
     try:
+        logger.info(f"🚀 Starting login for: {username}")
+        
+        # Step 1: Create profile session using Browserless API
+        logger.info("📝 Creating profile session...")
+        profile_response = requests.post(
+            f"{BROWSERLESS_ORIGIN}/profile?token={BROWSERLESS_TOKEN}",
+            headers={'Content-Type': 'application/json'},
+            json={'name': PROFILE_NAME}
+        )
+        
+        if profile_response.status_code != 200:
+            error_msg = f"Failed to create profile: {profile_response.text}"
+            logger.error(f"❌ {error_msg}")
+            return {"success": False, "error": error_msg}
+        
+        session_data = profile_response.json()
+        logger.info(f"✅ Profile session created: {session_data.get('id', 'unknown')}")
+        
+        # Step 2: Connect to Browserless
         with sync_playwright() as p:
-            logger.info("🔗 Connecting to Browserless to create new profile...")
+            browser = p.chromium.connect_over_cdp(session_data['connect'])
+            logger.info("✅ Connected to Browserless")
             
-            # First, try to delete existing profile if it exists
             try:
-                delete_url = f"{BROWSERLESS_ORIGIN}/profile/delete?token={BROWSERLESS_TOKEN}&name={PROFILE_NAME}"
-                delete_response = requests.delete(delete_url, timeout=10)
-                if delete_response.status_code == 200:
-                    logger.info(f"🗑️ Deleted existing profile: {PROFILE_NAME}")
+                context = browser.contexts[0]
+                page = context.pages[0] if context.pages else context.new_page()
+                
+                # Step 3: Navigate to Instagram
+                logger.info("🌐 Navigating to Instagram login...")
+                page.goto('https://www.instagram.com/accounts/login/', wait_until='domcontentloaded')
+                time.sleep(2)
+                
+                # Step 4: Handle cookie banner
+                try:
+                    allow_cookies = page.query_selector('button:has-text("Allow all cookies")')
+                    if allow_cookies:
+                        allow_cookies.click()
+                        logger.info("✅ Handled cookie banner")
+                        time.sleep(1)
+                except:
+                    pass
+                
+                # Step 5: Fill username
+                logger.info("📝 Filling username...")
+                username_field = page.query_selector('input[name="username"]')
+                if username_field:
+                    username_field.fill(username)
                 else:
-                    logger.info(f"ℹ️ No existing profile to delete: {delete_response.status_code}")
+                    inputs = page.query_selector_all('input[type="text"]')
+                    if inputs and len(inputs) > 0:
+                        inputs[0].fill(username)
+                    else:
+                        return {"success": False, "error": "Could not find username field"}
+                logger.info("✅ Username filled")
+                time.sleep(1)
+                
+                # Step 6: Fill password
+                logger.info("🔑 Filling password...")
+                password_field = page.query_selector('input[name="password"]')
+                if not password_field:
+                    password_field = page.query_selector('input[type="password"]')
+                if password_field:
+                    password_field.fill(password)
+                    logger.info("✅ Password filled")
+                else:
+                    return {"success": False, "error": "Could not find password field"}
+                time.sleep(1)
+                
+                # Step 7: Submit login
+                logger.info("📤 Submitting login...")
+                submit_button = page.query_selector('button[type="submit"]')
+                if submit_button:
+                    submit_button.click()
+                else:
+                    page.keyboard.press("Enter")
+                logger.info("✅ Login submitted")
+                
+                # Step 8: Wait for response
+                page.wait_for_load_state('networkidle', timeout=30000)
+                time.sleep(3)
+                
+                # Step 9: Check current URL for 2FA
+                current_url = page.url
+                logger.info(f"📍 Current URL: {current_url}")
+                
+                if "two_step_verification" in current_url or "challenge" in current_url:
+                    logger.info("🔐 2FA page detected! Waiting for user to enter code...")
+                    login_status["awaiting_2fa"] = True
+                    
+                    # Wait for 2FA code from queue (max 120 seconds)
+                    try:
+                        twofa_code = twofa_queue.get(timeout=120)
+                        logger.info(f"📱 Received 2FA code: {twofa_code}")
+                        
+                        # Find 2FA input field
+                        twofa_input = None
+                        selectors = [
+                            'input[type="text"]',
+                            'input[autocomplete="off"]',
+                            'input[placeholder*="code" i]',
+                            'input[inputmode="numeric"]',
+                            'input[name="verificationCode"]'
+                        ]
+                        
+                        for selector in selectors:
+                            twofa_input = page.query_selector(selector)
+                            if twofa_input:
+                                logger.info(f"✅ Found 2FA input with selector: {selector}")
+                                break
+                        
+                        if not twofa_input:
+                            login_status["awaiting_2fa"] = False
+                            return {"success": False, "error": "Could not find 2FA input field"}
+                        
+                        # Fill 2FA code
+                        twofa_input.click()
+                        time.sleep(0.5)
+                        twofa_input.fill("")
+                        time.sleep(0.3)
+                        
+                        for char in twofa_code:
+                            twofa_input.type(char, delay=50)
+                            time.sleep(0.05)
+                        
+                        time.sleep(0.5)
+                        
+                        # Submit 2FA
+                        submit_2fa = page.query_selector('button[type="submit"]')
+                        if submit_2fa:
+                            submit_2fa.click()
+                            logger.info("✅ 2FA submitted via button")
+                        else:
+                            page.keyboard.press("Enter")
+                            logger.info("✅ 2FA submitted with Enter")
+                        
+                        # Step 10: Wait for login completion
+                        logger.info("⏳ Waiting for login completion...")
+                        time.sleep(3)
+                        
+                        # Check for "Save Info" button (login success indicator)
+                        login_complete = False
+                        login_indicators = []
+                        final_url = page.url
+                        
+                        for attempt in range(15):  # 15 attempts = ~30 seconds
+                            time.sleep(2)
+                            current_url = page.url
+                            logger.info(f"  Check {attempt+1}: URL: {current_url[:60]}...")
+                            
+                            # Check for "Save Info" button
+                            try:
+                                save_info_button = page.query_selector('button:has-text("Save Info")')
+                                if save_info_button:
+                                    logger.info("✅ 'Save Info' button found - login successful!")
+                                    login_complete = True
+                                    login_indicators.append("Save Info button")
+                                    final_url = current_url
+                                    # Click it to complete login
+                                    try:
+                                        save_info_button.click()
+                                        logger.info("✅ Clicked 'Save Info'")
+                                        time.sleep(1)
+                                    except:
+                                        pass
+                                    break
+                            except:
+                                pass
+                            
+                            # Check for "Not Now" button
+                            try:
+                                not_now_button = page.query_selector('button:has-text("Not Now")')
+                                if not_now_button:
+                                    logger.info("✅ 'Not Now' button found - login successful!")
+                                    login_complete = True
+                                    login_indicators.append("Not Now button")
+                                    final_url = current_url
+                                    break
+                            except:
+                                pass
+                            
+                            # Check if URL changed from login/2FA pages
+                            if "two_step_verification" not in current_url and "challenge" not in current_url:
+                                if "instagram.com" in current_url and "login" not in current_url:
+                                    login_complete = True
+                                    login_indicators.append(f"URL: {current_url[:50]}...")
+                                    final_url = current_url
+                                    break
+                            
+                            # Check for home page elements
+                            try:
+                                home_link = page.query_selector('a[href="/"]')
+                                if home_link:
+                                    login_complete = True
+                                    login_indicators.append("Home link found")
+                                    final_url = current_url
+                                    break
+                            except:
+                                pass
+                        
+                        # If still on 2FA page, try one more time
+                        if not login_complete and "two_step_verification" in page.url:
+                            logger.info("⏳ Still on 2FA page, checking one more time...")
+                            time.sleep(5)
+                            try:
+                                save_info_button = page.query_selector('button:has-text("Save Info")')
+                                if save_info_button:
+                                    logger.info("✅ 'Save Info' button found after extra wait!")
+                                    login_complete = True
+                                    login_indicators.append("Save Info button (extra wait)")
+                                    final_url = page.url
+                                    try:
+                                        save_info_button.click()
+                                    except:
+                                        pass
+                            except:
+                                pass
+                        
+                        login_status["awaiting_2fa"] = False
+                        
+                    except queue.Empty:
+                        logger.error("❌ 2FA timeout - no code received")
+                        login_status["awaiting_2fa"] = False
+                        return {"success": False, "error": "2FA timeout - no code received"}
+                else:
+                    # No 2FA required - check if login was successful
+                    login_complete = "login" not in current_url and "instagram.com" in current_url
+                    final_url = current_url
+                    login_indicators = ["No 2FA required"]
+                    
+                    # Check for "Save Info" button
+                    if login_complete:
+                        try:
+                            save_info_button = page.query_selector('button:has-text("Save Info")')
+                            if save_info_button:
+                                login_indicators.append("Save Info button")
+                                try:
+                                    save_info_button.click()
+                                except:
+                                    pass
+                        except:
+                            pass
+                
+                # Step 11: Save session if login successful
+                if login_complete:
+                    logger.info(f"🎉 Login successful! Indicators: {', '.join(login_indicators)}")
+                    
+                    # Get cookies
+                    cookies = page.context.cookies()
+                    
+                    # Save session to file
+                    session_data = {
+                        "username": username,
+                        "cookies": cookies,
+                        "timestamp": datetime.now().isoformat(),
+                        "url": final_url,
+                        "indicators": login_indicators
+                    }
+                    with open('session.json', 'w') as f:
+                        json.dump(session_data, f, indent=2)
+                    logger.info(f"✅ Session saved with {len(cookies)} cookies")
+                    
+                    # Save profile to Browserless
+                    try:
+                        save_response = requests.post(
+                            f"{BROWSERLESS_ORIGIN}/profile/save?token={BROWSERLESS_TOKEN}",
+                            headers={'Content-Type': 'application/json'},
+                            json={
+                                'name': PROFILE_NAME,
+                                'state': {
+                                    'cookies': [
+                                        {
+                                            'name': c.get('name'),
+                                            'value': c.get('value'),
+                                            'domain': c.get('domain'),
+                                            'path': c.get('path', '/'),
+                                            'expires': c.get('expirationDate', -1),
+                                            'httpOnly': c.get('httpOnly', False),
+                                            'secure': c.get('secure', False),
+                                            'session': c.get('session', True)
+                                        }
+                                        for c in cookies
+                                    ],
+                                    'origins': []
+                                }
+                            }
+                        )
+                        if save_response.status_code in [200, 201]:
+                            logger.info("✅ Profile saved to Browserless")
+                        else:
+                            logger.warning(f"⚠️ Could not save profile: {save_response.status_code}")
+                    except Exception as e:
+                        logger.warning(f"⚠️ Could not save profile to Browserless: {e}")
+                    
+                    # Send cookies to Vercel
+                    send_cookies_to_vercel(cookies, username)
+                    
+                    return {
+                        "success": True,
+                        "username": username,
+                        "cookies": cookies,
+                        "url": final_url,
+                        "message": "Login successful!",
+                        "indicators": login_indicators
+                    }
+                else:
+                    # Check if we're stuck on 2FA page
+                    if page.url and "two_step_verification" in page.url:
+                        return {"success": False, "error": "2FA verification failed - code may be incorrect or expired. Try again with a fresh code.", "url": page.url}
+                    else:
+                        return {"success": False, "error": f"Login failed. URL: {page.url}", "url": page.url}
+                    
             except Exception as e:
-                logger.warning(f"⚠️ Could not delete existing profile: {e}")
-            
-            # Create new profile
-            logger.info(f"📝 Creating new profile: {PROFILE_NAME}")
-            
-            # Connect to Browserless and create a new context with the profile
-            browser = p.chromium.connect_over_cdp(
-                f"wss://{BROWSERLESS_ORIGIN.replace('https://', '')}?token={BROWSERLESS_TOKEN}&profile={PROFILE_NAME}"
-            )
-            logger.info(f"✅ Connected with new profile: {PROFILE_NAME}")
-            
-            context = browser.contexts[0] if browser.contexts else browser.new_context()
-            page = context.new_page()
-            
-            # Navigate to Instagram login page
-            logger.info("🌐 Navigating to Instagram login...")
-            page.goto("https://www.instagram.com/accounts/login/", wait_until="networkidle")
-            time.sleep(2)
-            
-            # Login
-            login_success = login_to_instagram(page)
-            if not login_success:
+                logger.error(f"❌ Login error: {str(e)}")
+                import traceback
+                logger.error(traceback.format_exc())
+                return {"success": False, "error": str(e)}
+            finally:
                 browser.close()
-                return {"success": False, "error": "Login failed"}
-            
-            # Extract cookies
-            logger.info("🍪 Extracting cookies...")
-            cookies = context.cookies()
-            logger.info(f"✅ Extracted {len(cookies)} cookies")
-            
-            browser.close()
-            
-            # Send cookies to Vercel
-            if cookies:
-                send_cookies_to_vercel(cookies)
-            
-            return {
-                "success": True,
-                "message": f"New profile '{PROFILE_NAME}' created with {len(cookies)} cookies",
-                "cookies": cookies,
-                "count": len(cookies),
-                "new_profile": True
-            }
-            
+                
     except Exception as e:
-        logger.error(f"❌ Error creating new profile: {e}")
+        logger.error(f"❌ Browserless error: {str(e)}")
         return {"success": False, "error": str(e)}
 
 # ============================================
-# EXTRACT COOKIES FROM BROWSERLESS
+# ROUTES
 # ============================================
 
-def extract_cookies_from_browserless():
-    """Extract cookies from Browserless profile"""
-    logger.info("🍪 Starting cookie extraction...")
+@app.route('/')
+def index():
+    return render_template_string(HTML_TEMPLATE, username=INSTAGRAM_USERNAME)
+
+@app.route('/login', methods=['POST'])
+def login():
+    global login_status, twofa_queue
+    
+    if login_status.get("in_progress"):
+        return jsonify({"success": False, "message": "Login already in progress"})
+    
+    data = request.json or {}
+    username = data.get('username', INSTAGRAM_USERNAME)
+    password = data.get('password')
+    
+    if not username:
+        return jsonify({"success": False, "error": "Username required"}), 400
+    
+    if not password:
+        return jsonify({"success": False, "error": "Password required"}), 400
     
     if not BROWSERLESS_TOKEN:
-        logger.error("❌ BROWSERLESS_API_KEY not set")
-        return {"success": False, "error": "BROWSERLESS_API_KEY not set"}
+        return jsonify({"success": False, "error": "BROWSERLESS_API_KEY not configured"}), 400
+    
+    # Clear old queue items
+    while not twofa_queue.empty():
+        try:
+            twofa_queue.get_nowait()
+        except:
+            pass
+    
+    login_status = {
+        "in_progress": True,
+        "completed": False,
+        "result": None,
+        "start_time": datetime.now().isoformat(),
+        "end_time": None,
+        "error": None,
+        "awaiting_2fa": False
+    }
+    
+    thread = threading.Thread(target=run_login_background, args=(username, password))
+    thread.daemon = True
+    thread.start()
+    
+    return jsonify({"success": True, "message": "Login started"})
+
+@app.route('/status')
+def status():
+    try:
+        session_exists = os.path.exists('session.json')
+        session_data = None
+        if session_exists:
+            try:
+                with open('session.json', 'r') as f:
+                    session_data = json.load(f)
+            except:
+                pass
+        
+        return jsonify({
+            "logged_in": session_exists,
+            "session_exists": session_exists,
+            "session_user": session_data.get('username') if session_data else None,
+            "session_time": session_data.get('timestamp') if session_data else None,
+            "session_url": session_data.get('url') if session_data else None,
+            "session_indicators": session_data.get('indicators') if session_data else None,
+            "username": INSTAGRAM_USERNAME,
+            "login_status": {
+                "in_progress": login_status.get("in_progress", False),
+                "completed": login_status.get("completed", False),
+                "awaiting_2fa": login_status.get("awaiting_2fa", False),
+                "start_time": login_status.get("start_time"),
+                "end_time": login_status.get("end_time"),
+                "error": login_status.get("error")
+            }
+        })
+    except Exception as e:
+        logger.error(f"Status error: {e}")
+        return jsonify({
+            "logged_in": False,
+            "session_exists": False,
+            "username": INSTAGRAM_USERNAME,
+            "login_status": {
+                "in_progress": False,
+                "completed": False,
+                "awaiting_2fa": False
+            },
+            "error": str(e)
+        })
+
+@app.route('/result')
+def get_result():
+    if login_status.get("completed"):
+        return jsonify(login_status.get("result", {"success": False, "error": "No result"}))
+    return jsonify({"success": False, "message": "Login not completed yet"})
+
+@app.route('/submit_2fa', methods=['POST'])
+def submit_2fa():
+    """Submit 2FA code via queue"""
+    global twofa_queue
+    
+    data = request.json or {}
+    code = data.get('code', '')
+    
+    if not code or len(code) < 6:
+        return jsonify({"success": False, "error": "Invalid 2FA code"}), 400
     
     try:
-        with sync_playwright() as p:
-            logger.info("🔗 Connecting to Browserless...")
-            
-            # Try to connect with profile
-            try:
-                browser = p.chromium.connect_over_cdp(
-                    f"wss://{BROWSERLESS_ORIGIN.replace('https://', '')}?token={BROWSERLESS_TOKEN}&profile={PROFILE_NAME}"
-                )
-                logger.info(f"✅ Connected with profile: {PROFILE_NAME}")
-            except Exception as e:
-                logger.warning(f"⚠️ Profile connection failed: {e}")
-                browser = p.chromium.connect_over_cdp(
-                    f"wss://{BROWSERLESS_ORIGIN.replace('https://', '')}?token={BROWSERLESS_TOKEN}"
-                )
-                logger.info("✅ Connected without profile")
-            
-            context = browser.contexts[0] if browser.contexts else browser.new_context()
-            page = context.new_page()
-            
-            # Navigate to Instagram
-            logger.info("🌐 Navigating to Instagram...")
-            page.goto("https://www.instagram.com/", wait_until="networkidle")
-            time.sleep(2)
-            
-            # Check if logged in
-            if "login" in page.url or page.url.startswith("https://www.instagram.com/accounts/login/"):
-                logger.info("🔑 Not logged in, attempting login...")
-                login_success = login_to_instagram(page)
-                if not login_success:
-                    browser.close()
-                    return {"success": False, "error": "Login failed - need 2FA or verification"}
-            
-            # Extract cookies
-            logger.info("🍪 Extracting cookies...")
-            cookies = context.cookies()
-            logger.info(f"✅ Extracted {len(cookies)} cookies")
-            
-            browser.close()
-            
-            # Send cookies to Vercel
-            if cookies:
-                send_cookies_to_vercel(cookies)
-            
-            return {
-                "success": True,
-                "cookies": cookies,
-                "count": len(cookies)
-            }
-            
+        twofa_queue.put(code)
+        logger.info(f"✅ 2FA code added to queue: {code}")
+        return jsonify({"success": True, "message": "2FA code received"})
     except Exception as e:
-        logger.error(f"❌ Error: {e}")
-        return {"success": False, "error": str(e)}
+        logger.error(f"2FA submission error: {str(e)}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+@app.route('/clear_session', methods=['POST'])
+def clear_session():
+    """Clear the session.json file"""
+    try:
+        if os.path.exists('session.json'):
+            os.remove('session.json')
+            logger.info("✅ Session cleared")
+        return jsonify({"success": True})
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)})
 
 # ============================================
-# REFRESH BROWSERLESS PROFILE - CREATE NEW
+# BACKGROUND LOGIN
 # ============================================
 
-def refresh_browserless_profile():
-    """
-    Refresh by creating a brand new profile with fresh login.
-    """
-    logger.info("🔄 Refreshing Browserless profile by creating new profile...")
+def run_login_background(username, password):
+    global login_status
     
-    result = create_new_browserless_profile()
-    
-    if result.get('success'):
-        # Also save to Vercel webhook
-        cookies = result.get('cookies', [])
-        if cookies:
-            send_cookies_to_vercel(cookies)
-        
-        return {
-            "success": True,
-            "message": "New profile created and logged in",
-            "cookies": cookies,
-            "count": len(cookies),
-            "new_profile": True
-        }
-    else:
-        return result
+    try:
+        result = login_with_browserless(username, password)
+        login_status["completed"] = True
+        login_status["result"] = result
+        login_status["in_progress"] = False
+        login_status["end_time"] = datetime.now().isoformat()
+                
+    except Exception as e:
+        logger.error(f"❌ Background login error: {str(e)}")
+        login_status["completed"] = True
+        login_status["result"] = {"success": False, "error": str(e)}
+        login_status["in_progress"] = False
 
 # ============================================
 # SEND COOKIES TO VERCEL
 # ============================================
 
-def send_cookies_to_vercel(cookies):
+def send_cookies_to_vercel(cookies, username=None):
     """Send extracted cookies to Vercel webhook"""
     if not VERCEL_WEBHOOK_URL:
         logger.warning("⚠️ VERCEL_WEBHOOK_URL not set, skipping")
@@ -611,12 +988,12 @@ def send_cookies_to_vercel(cookies):
     try:
         logger.info(f"📤 Sending {len(cookies)} cookies to Vercel...")
         
-        # Get username from cookies
-        username = None
-        for cookie in cookies:
-            if cookie.get('name') == 'ds_user_id':
-                username = cookie.get('value')
-                break
+        # Get username from cookies if not provided
+        if not username:
+            for cookie in cookies:
+                if cookie.get('name') == 'ds_user_id':
+                    username = cookie.get('value')
+                    break
         
         response = requests.post(
             VERCEL_WEBHOOK_URL,
@@ -638,51 +1015,68 @@ def send_cookies_to_vercel(cookies):
         logger.error(f"❌ Failed to send cookies to Vercel: {e}")
 
 # ============================================
-# ROUTES
+# API ENDPOINTS (for Vercel compatibility)
 # ============================================
-
-@app.route('/')
-def index():
-    return render_template_string(HTML_TEMPLATE)
 
 @app.route('/api/extract', methods=['POST'])
 def api_extract():
-    """API endpoint to extract cookies"""
-    result = extract_cookies_from_browserless()
-    return jsonify(result)
+    """API endpoint to extract cookies from existing profile"""
+    logger.info("🍪 Extract endpoint called")
+    
+    try:
+        if not os.path.exists('session.json'):
+            return jsonify({"success": False, "error": "No session found. Please login first."}), 404
+        
+        with open('session.json', 'r') as f:
+            session_data = json.load(f)
+        
+        cookies = session_data.get('cookies', [])
+        return jsonify({
+            "success": True,
+            "cookies": cookies,
+            "count": len(cookies),
+            "username": session_data.get('username')
+        })
+    except Exception as e:
+        logger.error(f"❌ Extract error: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
 
 @app.route('/api/refresh', methods=['POST'])
 def api_refresh():
-    """API endpoint to create a new profile with fresh login"""
-    logger.info("🔄 Refresh endpoint called - creating new profile...")
+    """API endpoint to refresh profile"""
+    logger.info("🔄 Refresh endpoint called")
     
-    result = refresh_browserless_profile()
+    # Check if we have a session
+    if os.path.exists('session.json'):
+        try:
+            with open('session.json', 'r') as f:
+                session_data = json.load(f)
+            cookies = session_data.get('cookies', [])
+            if cookies:
+                # Refresh by sending existing cookies to Vercel
+                send_cookies_to_vercel(cookies, session_data.get('username'))
+                return jsonify({
+                    "success": True,
+                    "message": "Cookies refreshed from existing session",
+                    "cookies": cookies,
+                    "count": len(cookies)
+                })
+        except:
+            pass
     
-    if result.get('success'):
+    # If no session, try to create one
+    if INSTAGRAM_USERNAME and INSTAGRAM_PASSWORD:
+        logger.info("🔄 No session found, attempting to create new profile...")
         return jsonify({
-            "success": True,
-            "message": result.get('message', 'New profile created successfully'),
-            "cookies": result.get('cookies', []),
-            "count": len(result.get('cookies', [])),
-            "new_profile": result.get('new_profile', True)
-        })
+            "success": False,
+            "message": "Please login first using the web interface",
+            "login_url": "/"
+        }), 403
     else:
         return jsonify({
             "success": False,
-            "error": result.get('error', 'Failed to create new profile')
-        }), 500
-
-@app.route('/api/send-to-vercel', methods=['POST'])
-def api_send_to_vercel():
-    """API endpoint to send cookies to Vercel"""
-    data = request.get_json(silent=True) or {}
-    cookies = data.get('cookies', [])
-    
-    if not cookies:
-        return jsonify({"success": False, "error": "No cookies provided"})
-    
-    send_cookies_to_vercel(cookies)
-    return jsonify({"success": True, "message": f"Sent {len(cookies)} cookies to Vercel"})
+            "error": "No session and no credentials configured"
+        }), 404
 
 @app.route('/health')
 def health():
@@ -691,6 +1085,7 @@ def health():
         "timestamp": datetime.now().isoformat(),
         "browserless_configured": bool(BROWSERLESS_TOKEN),
         "profile": PROFILE_NAME,
+        "session_exists": os.path.exists('session.json'),
         "vercel_webhook_configured": bool(VERCEL_WEBHOOK_URL),
         "instagram_credentials_configured": bool(INSTAGRAM_USERNAME and INSTAGRAM_PASSWORD)
     })
