@@ -859,7 +859,7 @@ def send_cookies_to_vercel(cookies, username=None):
         logger.error(f"❌ Failed to send cookies to Vercel: {e}")
 
 def login_with_browserless(username, password):
-    """Login to Instagram using Browserless with AUTO 2FA"""
+    """Login to Instagram using Browserless with DIRECT AUTO 2FA"""
     global login_status, twofa_queue
     
     if not BROWSERLESS_TOKEN:
@@ -955,201 +955,160 @@ def login_with_browserless(username, password):
                 current_url = page.url
                 logger.info(f"📍 Current URL: {current_url}")
                 
-                # Take screenshot for debugging
-                try:
-                    page.screenshot(path='/tmp/login_attempt.png')
-                    logger.info("📸 Screenshot saved for debugging")
-                except:
-                    pass
-                
-                # 🔥 CHECK FOR 2FA - DETECT AND AUTO-SUBMIT
+                # ============================================
+                # 🔥 DIRECT AUTO 2FA - NO QUEUE WAITING
+                # ============================================
                 if "two_step_verification" in current_url or "challenge" in current_url:
-                    logger.info("🔐 2FA page detected!")
+                    logger.info("🔐 2FA page detected! Generating and submitting code...")
                     login_status["awaiting_2fa"] = True
                     
-                    # ✅ AUTO GENERATE 2FA CODE
+                    # ✅ STEP 1: Generate 2FA code directly
+                    twofa_code = None
                     if TWOFA_SECRET and PYOTP_AVAILABLE:
                         twofa_code = generate_2fa_code()
-                        if twofa_code:
-                            logger.info(f"🤖 Auto-generated 2FA code: {twofa_code}")
-                            
-                            # ✅ PUT CODE IN QUEUE (for the waiting thread)
-                            twofa_queue.put(twofa_code)
-                            logger.info(f"✅ 2FA code added to queue: {twofa_code}")
-                            
-                            # Wait a moment for the queue to be processed
-                            time.sleep(1)
-                            
-                            # ✅ ALSO TRY TO FILL DIRECTLY (faster)
-                            try:
-                                # Find 2FA input field
-                                twofa_input = None
-                                selectors = [
-                                    'input[type="text"]',
-                                    'input[autocomplete="off"]',
-                                    'input[placeholder*="code" i]',
-                                    'input[inputmode="numeric"]',
-                                    'input[type="tel"]',
-                                    'input[name="verificationCode"]'
-                                ]
-                                
-                                for selector in selectors:
-                                    try:
-                                        twofa_input = page.query_selector(selector)
-                                        if twofa_input and twofa_input.is_visible():
-                                            logger.info(f"✅ Found 2FA input with selector: {selector}")
-                                            break
-                                    except:
-                                        continue
-                                
-                                if twofa_input:
-                                    # Fill 2FA code directly
-                                    twofa_input.click()
-                                    time.sleep(0.5)
-                                    twofa_input.fill("")
-                                    time.sleep(0.3)
-                                    
-                                    for char in twofa_code:
-                                        twofa_input.type(char, delay=50)
-                                        time.sleep(0.05)
-                                    
-                                    logger.info(f"✅ Auto-filled 2FA code: {twofa_code}")
-                                    time.sleep(0.5)
-                                    
-                                    # Submit 2FA
-                                    submit_2fa = page.query_selector('button[type="submit"]')
-                                    if not submit_2fa:
-                                        submit_2fa = page.query_selector('button:has-text("Submit")')
-                                    if not submit_2fa:
-                                        submit_2fa = page.query_selector('button:has-text("Confirm")')
-                                    if not submit_2fa:
-                                        submit_2fa = page.query_selector('button:has-text("Verify")')
-                                    
-                                    if submit_2fa and submit_2fa.is_visible():
-                                        submit_2fa.click()
-                                        logger.info("✅ 2FA submitted via button")
-                                    else:
-                                        page.keyboard.press("Enter")
-                                        logger.info("✅ 2FA submitted with Enter")
-                                    
-                                    # Wait for login to complete
-                                    time.sleep(5)
-                                    page.wait_for_load_state('networkidle', timeout=30000)
-                                    
-                                    # Check if login was successful
-                                    final_url = page.url
-                                    logger.info(f"📍 After 2FA URL: {final_url}")
-                                    
-                                    if "two_step_verification" not in final_url and "challenge" not in final_url:
-                                        logger.info("✅ 2FA verification successful!")
-                                        
-                                        # Check for "Save Info" button
-                                        try:
-                                            save_info = page.query_selector('button:has-text("Save Info")')
-                                            if save_info:
-                                                save_info.click()
-                                                logger.info("✅ Clicked 'Save Info'")
-                                        except:
-                                            pass
-                                        
-                                        # Check for "Not Now" button
-                                        try:
-                                            not_now = page.query_selector('button:has-text("Not Now")')
-                                            if not_now:
-                                                not_now.click()
-                                                logger.info("✅ Clicked 'Not Now'")
-                                        except:
-                                            pass
-                                        
-                                        login_status["awaiting_2fa"] = False
-                                        
-                                        # Continue to success
-                                    else:
-                                        logger.warning("⚠️ Still on 2FA page after direct fill")
-                                        # Try queue-based method as fallback
-                                        try:
-                                            logger.info("⏳ Waiting for queue-based 2FA...")
-                                            queue_code = twofa_queue.get(timeout=30)
-                                            if queue_code:
-                                                logger.info(f"📱 Queue provided code: {queue_code}")
-                                                # Find and fill the input
-                                                for selector in selectors:
-                                                    try:
-                                                        twofa_input = page.query_selector(selector)
-                                                        if twofa_input and twofa_input.is_visible():
-                                                            break
-                                                    except:
-                                                        continue
-                                                
-                                                if twofa_input:
-                                                    twofa_input.click()
-                                                    time.sleep(0.5)
-                                                    twofa_input.fill("")
-                                                    time.sleep(0.3)
-                                                    for char in queue_code:
-                                                        twofa_input.type(char, delay=50)
-                                                        time.sleep(0.05)
-                                                    time.sleep(0.5)
-                                                    
-                                                    submit_2fa = page.query_selector('button[type="submit"]')
-                                                    if submit_2fa:
-                                                        submit_2fa.click()
-                                                    else:
-                                                        page.keyboard.press("Enter")
-                                                    
-                                                    time.sleep(5)
-                                                    page.wait_for_load_state('networkidle', timeout=30000)
-                                        except queue.Empty:
-                                            logger.error("❌ Queue timeout")
-                            except Exception as e:
-                                logger.error(f"❌ Error in 2FA fill: {e}")
-                        else:
-                            logger.error("❌ Failed to generate 2FA code")
+                        logger.info(f"🤖 Generated 2FA code: {twofa_code}")
                     else:
-                        # No 2FA secret - wait for manual input
-                        logger.info("⏳ Waiting for manual 2FA input...")
+                        logger.error("❌ 2FA secret not configured!")
+                        login_status["awaiting_2fa"] = False
+                        return {"success": False, "error": "2FA secret not configured"}
+                    
+                    if not twofa_code:
+                        logger.error("❌ Failed to generate 2FA code")
+                        login_status["awaiting_2fa"] = False
+                        return {"success": False, "error": "Failed to generate 2FA code"}
+                    
+                    # ✅ STEP 2: Find 2FA input field
+                    logger.info("🔍 Looking for 2FA input field...")
+                    twofa_input = None
+                    
+                    # Try multiple selectors
+                    selectors = [
+                        'input[type="text"]',
+                        'input[autocomplete="off"]',
+                        'input[placeholder*="code" i]',
+                        'input[inputmode="numeric"]',
+                        'input[type="tel"]',
+                        'input[name="verificationCode"]',
+                        'input[aria-label*="code" i]',
+                        'input[class*="code" i]',
+                        'input[class*="two_factor" i]',
+                        'input[class*="verification" i]'
+                    ]
+                    
+                    for selector in selectors:
                         try:
-                            twofa_code = twofa_queue.get(timeout=120)
-                            logger.info(f"📱 Received manual 2FA code")
-                            
-                            # Find and fill the input
-                            twofa_input = None
-                            selectors = [
-                                'input[type="text"]',
-                                'input[autocomplete="off"]',
-                                'input[placeholder*="code" i]',
-                                'input[inputmode="numeric"]'
-                            ]
-                            for selector in selectors:
-                                try:
-                                    twofa_input = page.query_selector(selector)
-                                    if twofa_input and twofa_input.is_visible():
-                                        break
-                                except:
-                                    continue
-                            
-                            if twofa_input:
-                                twofa_input.click()
-                                time.sleep(0.5)
-                                twofa_input.fill("")
-                                time.sleep(0.3)
-                                for char in twofa_code:
-                                    twofa_input.type(char, delay=50)
-                                    time.sleep(0.05)
-                                time.sleep(0.5)
-                                
-                                submit_2fa = page.query_selector('button[type="submit"]')
-                                if submit_2fa:
-                                    submit_2fa.click()
-                                else:
-                                    page.keyboard.press("Enter")
-                                
-                                time.sleep(5)
-                                page.wait_for_load_state('networkidle', timeout=30000)
-                        except queue.Empty:
-                            logger.error("❌ 2FA timeout")
-                            login_status["awaiting_2fa"] = False
-                            return {"success": False, "error": "2FA timeout"}
+                            twofa_input = page.query_selector(selector)
+                            if twofa_input and twofa_input.is_visible():
+                                logger.info(f"✅ Found 2FA input with selector: {selector}")
+                                break
+                        except:
+                            continue
+                    
+                    # If still not found, try any visible input
+                    if not twofa_input:
+                        logger.info("🔍 Looking for any visible input...")
+                        all_inputs = page.query_selector_all('input')
+                        for inp in all_inputs:
+                            if inp.is_visible():
+                                twofa_input = inp
+                                logger.info("✅ Found input field as fallback")
+                                break
+                    
+                    if not twofa_input:
+                        logger.error("❌ Could not find 2FA input field")
+                        login_status["awaiting_2fa"] = False
+                        return {"success": False, "error": "Could not find 2FA input field"}
+                    
+                    # ✅ STEP 3: Fill the 2FA code
+                    logger.info(f"📝 Filling 2FA code: {twofa_code}")
+                    twofa_input.click()
+                    time.sleep(0.5)
+                    
+                    # Clear the field
+                    twofa_input.fill("")
+                    time.sleep(0.3)
+                    
+                    # Type the code character by character (more human-like)
+                    for char in twofa_code:
+                        twofa_input.type(char, delay=50)
+                        time.sleep(0.05)
+                    
+                    logger.info(f"✅ Auto-filled 2FA code: {twofa_code}")
+                    time.sleep(0.5)
+                    
+                    # ✅ STEP 4: Submit 2FA
+                    logger.info("📤 Submitting 2FA code...")
+                    submit_2fa = None
+                    
+                    # Try different button types
+                    button_selectors = [
+                        'button[type="submit"]',
+                        'button:has-text("Submit")',
+                        'button:has-text("Confirm")',
+                        'button:has-text("Verify")',
+                        'button:has-text("Send")',
+                        'button:has-text("Continue")'
+                    ]
+                    
+                    for selector in button_selectors:
+                        try:
+                            submit_2fa = page.query_selector(selector)
+                            if submit_2fa and submit_2fa.is_visible():
+                                logger.info(f"✅ Found submit button with: {selector}")
+                                break
+                        except:
+                            continue
+                    
+                    if submit_2fa and submit_2fa.is_visible():
+                        submit_2fa.click()
+                        logger.info("✅ 2FA submitted via button")
+                    else:
+                        page.keyboard.press("Enter")
+                        logger.info("✅ 2FA submitted with Enter")
+                    
+                    # ✅ STEP 5: Wait for verification
+                    logger.info("⏳ Waiting for 2FA verification...")
+                    time.sleep(5)
+                    page.wait_for_load_state('networkidle', timeout=30000)
+                    
+                    # ✅ STEP 6: Check if 2FA was successful
+                    final_url = page.url
+                    logger.info(f"📍 After 2FA URL: {final_url}")
+                    
+                    # Handle post-2FA prompts
+                    if "two_step_verification" not in final_url and "challenge" not in final_url:
+                        logger.info("✅ 2FA verification successful!")
+                        
+                        # Check for "Save Info" button
+                        try:
+                            save_info = page.query_selector('button:has-text("Save Info")')
+                            if save_info and save_info.is_visible():
+                                save_info.click()
+                                logger.info("✅ Clicked 'Save Info'")
+                                time.sleep(1)
+                        except:
+                            pass
+                        
+                        # Check for "Not Now" button
+                        try:
+                            not_now = page.query_selector('button:has-text("Not Now")')
+                            if not_now and not_now.is_visible():
+                                not_now.click()
+                                logger.info("✅ Clicked 'Not Now'")
+                                time.sleep(1)
+                        except:
+                            pass
+                    else:
+                        # Try one more time with Enter
+                        logger.info("⏳ Still on 2FA page, trying Enter one more time...")
+                        try:
+                            page.keyboard.press("Enter")
+                            time.sleep(5)
+                            page.wait_for_load_state('networkidle', timeout=30000)
+                            final_url = page.url
+                            logger.info(f"📍 After second try: {final_url}")
+                        except:
+                            pass
                     
                     login_status["awaiting_2fa"] = False
                 
