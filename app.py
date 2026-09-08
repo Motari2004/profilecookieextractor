@@ -951,15 +951,72 @@ def login_with_browserless(username, password):
                 time.sleep(5)
                 page.wait_for_load_state('networkidle', timeout=30000)
                 
-                # Check current URL
-                current_url = page.url
-                logger.info(f"📍 Current URL: {current_url}")
+                # ============================================
+                # 🔥 CHECK FOR 2FA INPUT FIELD ON THE PAGE
+                # ============================================
+                logger.info("🔍 Checking for 2FA input field...")
+                
+                # ✅ Look for 2FA input field directly
+                twofa_input = None
+                twofa_selectors = [
+                    'input[type="text"]',
+                    'input[autocomplete="off"]',
+                    'input[placeholder*="code" i]',
+                    'input[inputmode="numeric"]',
+                    'input[type="tel"]',
+                    'input[name="verificationCode"]',
+                    'input[aria-label*="code" i]',
+                    'input[class*="code" i]',
+                    'input[class*="two_factor" i]',
+                    'input[class*="verification" i]'
+                ]
+                
+                # Check each selector for a visible input
+                for selector in twofa_selectors:
+                    try:
+                        inputs = page.query_selector_all(selector)
+                        for inp in inputs:
+                            if inp.is_visible():
+                                # Check if it's a 2FA input (usually has a label or placeholder)
+                                placeholder = inp.get_attribute('placeholder') or ''
+                                aria_label = inp.get_attribute('aria-label') or ''
+                                name = inp.get_attribute('name') or ''
+                                
+                                # Check if it's likely a 2FA input
+                                if any(keyword in (placeholder + aria_label + name).lower() for keyword in ['code', 'verification', 'two factor', '2fa']):
+                                    twofa_input = inp
+                                    logger.info(f"✅ Found 2FA input with selector: {selector}")
+                                    break
+                                
+                                # If no specific 2FA keywords, but it's the only visible text input, use it
+                                if not twofa_input:
+                                    twofa_input = inp
+                                    logger.info(f"✅ Found potential 2FA input: {selector}")
+                        if twofa_input:
+                            break
+                    except:
+                        continue
+                
+                # If still not found, check the URL as fallback
+                if not twofa_input:
+                    current_url = page.url
+                    logger.info(f"📍 Current URL: {current_url}")
+                    
+                    if "two_step_verification" in current_url or "challenge" in current_url:
+                        logger.info("🔐 2FA URL detected, looking for input field...")
+                        # Try to find any visible text input
+                        all_inputs = page.query_selector_all('input')
+                        for inp in all_inputs:
+                            if inp.is_visible():
+                                twofa_input = inp
+                                logger.info("✅ Found input field as fallback")
+                                break
                 
                 # ============================================
-                # 🔥 DIRECT AUTO 2FA - NO QUEUE WAITING
+                # IF 2FA INPUT FOUND → AUTO-SUBMIT CODE
                 # ============================================
-                if "two_step_verification" in current_url or "challenge" in current_url:
-                    logger.info("🔐 2FA page detected! Generating and submitting code...")
+                if twofa_input:
+                    logger.info("🔐 2FA input detected! Auto-submitting 2FA code...")
                     login_status["awaiting_2fa"] = True
                     
                     # ✅ STEP 1: Generate 2FA code directly
@@ -977,49 +1034,7 @@ def login_with_browserless(username, password):
                         login_status["awaiting_2fa"] = False
                         return {"success": False, "error": "Failed to generate 2FA code"}
                     
-                    # ✅ STEP 2: Find 2FA input field
-                    logger.info("🔍 Looking for 2FA input field...")
-                    twofa_input = None
-                    
-                    # Try multiple selectors
-                    selectors = [
-                        'input[type="text"]',
-                        'input[autocomplete="off"]',
-                        'input[placeholder*="code" i]',
-                        'input[inputmode="numeric"]',
-                        'input[type="tel"]',
-                        'input[name="verificationCode"]',
-                        'input[aria-label*="code" i]',
-                        'input[class*="code" i]',
-                        'input[class*="two_factor" i]',
-                        'input[class*="verification" i]'
-                    ]
-                    
-                    for selector in selectors:
-                        try:
-                            twofa_input = page.query_selector(selector)
-                            if twofa_input and twofa_input.is_visible():
-                                logger.info(f"✅ Found 2FA input with selector: {selector}")
-                                break
-                        except:
-                            continue
-                    
-                    # If still not found, try any visible input
-                    if not twofa_input:
-                        logger.info("🔍 Looking for any visible input...")
-                        all_inputs = page.query_selector_all('input')
-                        for inp in all_inputs:
-                            if inp.is_visible():
-                                twofa_input = inp
-                                logger.info("✅ Found input field as fallback")
-                                break
-                    
-                    if not twofa_input:
-                        logger.error("❌ Could not find 2FA input field")
-                        login_status["awaiting_2fa"] = False
-                        return {"success": False, "error": "Could not find 2FA input field"}
-                    
-                    # ✅ STEP 3: Fill the 2FA code
+                    # ✅ STEP 2: Fill the 2FA code
                     logger.info(f"📝 Filling 2FA code: {twofa_code}")
                     twofa_input.click()
                     time.sleep(0.5)
@@ -1028,7 +1043,7 @@ def login_with_browserless(username, password):
                     twofa_input.fill("")
                     time.sleep(0.3)
                     
-                    # Type the code character by character (more human-like)
+                    # Type the code character by character
                     for char in twofa_code:
                         twofa_input.type(char, delay=50)
                         time.sleep(0.05)
@@ -1036,7 +1051,7 @@ def login_with_browserless(username, password):
                     logger.info(f"✅ Auto-filled 2FA code: {twofa_code}")
                     time.sleep(0.5)
                     
-                    # ✅ STEP 4: Submit 2FA
+                    # ✅ STEP 3: Submit 2FA
                     logger.info("📤 Submitting 2FA code...")
                     submit_2fa = None
                     
@@ -1066,12 +1081,12 @@ def login_with_browserless(username, password):
                         page.keyboard.press("Enter")
                         logger.info("✅ 2FA submitted with Enter")
                     
-                    # ✅ STEP 5: Wait for verification
+                    # ✅ STEP 4: Wait for verification
                     logger.info("⏳ Waiting for 2FA verification...")
                     time.sleep(5)
                     page.wait_for_load_state('networkidle', timeout=30000)
                     
-                    # ✅ STEP 6: Check if 2FA was successful
+                    # ✅ STEP 5: Check if 2FA was successful
                     final_url = page.url
                     logger.info(f"📍 After 2FA URL: {final_url}")
                     
