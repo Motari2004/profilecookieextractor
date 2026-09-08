@@ -32,7 +32,7 @@ INSTAGRAM_PASSWORD = os.environ.get('INSTAGRAM_PASSWORD', '')
 VERCEL_WEBHOOK_URL = os.environ.get('VERCEL_WEBHOOK_URL', 'https://fetchgram-one.vercel.app/api/cookies/sync')
 
 # ============================================
-# HTML UI
+# HTML UI (kept the same)
 # ============================================
 
 HTML_TEMPLATE = '''
@@ -366,81 +366,8 @@ HTML_TEMPLATE = '''
 '''
 
 # ============================================
-# EXTRACT COOKIES FROM BROWSERLESS
+# LOGIN TO INSTAGRAM
 # ============================================
-
-def refresh_browserless_profile_with_cookies(cookies):
-    """
-    Refresh the Browserless profile with the given cookies.
-    """
-    logger.info("🔄 Refreshing Browserless profile with cookies...")
-    
-    if not BROWSERLESS_TOKEN:
-        logger.error("❌ BROWSERLESS_API_KEY not set")
-        return False
-    
-    try:
-        # Format cookies for Browserless refresh endpoint
-        formatted_cookies = []
-        for cookie in cookies:
-            formatted_cookies.append({
-                "name": cookie.get('name', ''),
-                "value": cookie.get('value', ''),
-                "domain": cookie.get('domain', '.instagram.com'),
-                "path": cookie.get('path', '/'),
-                "expires": cookie.get('expirationDate', -1),
-                "httpOnly": cookie.get('httpOnly', False),
-                "secure": cookie.get('secure', False),
-                "session": cookie.get('session', True)
-            })
-        
-        refresh_payload = {
-            "name": PROFILE_NAME,
-            "state": {
-                "cookies": formatted_cookies,
-                "origins": []  # Required by Browserless API
-            }
-        }
-        
-        refresh_url = f"{BROWSERLESS_ORIGIN}/profile/refresh?token={BROWSERLESS_TOKEN}"
-        
-        logger.info(f"📤 Sending refresh request to Browserless...")
-        
-        response = requests.post(
-            refresh_url,
-            json=refresh_payload,
-            headers={"Content-Type": "application/json"},
-            timeout=30
-        )
-        
-        if response.status_code == 200:
-            logger.info("✅ Browserless profile refreshed successfully!")
-            return True
-        elif response.status_code == 404:
-            logger.warning("⚠️ Profile not found, creating new profile...")
-            
-            create_url = f"{BROWSERLESS_ORIGIN}/profile/create?token={BROWSERLESS_TOKEN}"
-            create_response = requests.post(
-                create_url,
-                json=refresh_payload,
-                headers={"Content-Type": "application/json"},
-                timeout=30
-            )
-            
-            if create_response.status_code in [200, 201]:
-                logger.info(f"✅ Browserless profile created: {PROFILE_NAME}")
-                return True
-            else:
-                logger.error(f"❌ Profile creation failed: {create_response.status_code}")
-                return False
-        else:
-            logger.error(f"❌ Refresh failed: {response.status_code} - {response.text}")
-            return False
-            
-    except Exception as e:
-        logger.error(f"❌ Refresh error: {e}")
-        return False
-
 
 def login_to_instagram(page):
     """
@@ -453,25 +380,18 @@ def login_to_instagram(page):
         return False
     
     try:
-        # Wait for login form
         page.wait_for_selector('input[name="username"]', timeout=10000)
-        
-        # Fill credentials
         page.fill('input[name="username"]', INSTAGRAM_USERNAME)
         page.fill('input[name="password"]', INSTAGRAM_PASSWORD)
-        
-        # Click login button
         page.click('button[type="submit"]')
         
-        # Wait for navigation
         time.sleep(3)
         page.wait_for_load_state("networkidle")
         
-        # Check if login was successful
         if "login" not in page.url:
             logger.info("✅ Login successful!")
             
-            # Handle "Save Info" prompt if it appears
+            # Handle "Save Info" prompt
             try:
                 save_info = page.query_selector('button:has-text("Not Now")')
                 if save_info:
@@ -498,9 +418,108 @@ def login_to_instagram(page):
         logger.error(f"❌ Login error: {e}")
         return False
 
+# ============================================
+# BROWSERLESS PROFILE MANAGEMENT
+# ============================================
+
+def get_browserless_headers():
+    return {"Content-Type": "application/json"}
+
+def build_profile_state(cookies):
+    """Build the profile state payload for Browserless API."""
+    formatted_cookies = []
+    for cookie in cookies:
+        formatted_cookies.append({
+            "name": cookie.get('name', ''),
+            "value": cookie.get('value', ''),
+            "domain": cookie.get('domain', '.instagram.com'),
+            "path": cookie.get('path', '/'),
+            "expires": cookie.get('expirationDate', -1),
+            "httpOnly": cookie.get('httpOnly', False),
+            "secure": cookie.get('secure', False),
+            "session": cookie.get('session', True)
+        })
+    
+    return {
+        "name": PROFILE_NAME,
+        "state": {
+            "cookies": formatted_cookies,
+            "origins": []  # Required by Browserless API
+        }
+    }
+
+def delete_browserless_profile():
+    """Delete the existing profile."""
+    try:
+        delete_url = f"{BROWSERLESS_ORIGIN}/profile/{PROFILE_NAME}?token={BROWSERLESS_TOKEN}"
+        response = requests.delete(delete_url, timeout=10)
+        if response.status_code == 204:
+            logger.info(f"🗑️ Deleted profile: {PROFILE_NAME}")
+            return True
+        elif response.status_code == 404:
+            logger.info(f"ℹ️ Profile not found: {PROFILE_NAME}")
+            return True
+        else:
+            logger.warning(f"⚠️ Delete failed: {response.status_code}")
+            return False
+    except Exception as e:
+        logger.warning(f"⚠️ Delete error: {e}")
+        return False
+
+def create_profile_via_upload(cookies):
+    """Create a new profile using POST /profile/upload."""
+    try:
+        upload_url = f"{BROWSERLESS_ORIGIN}/profile/upload?token={BROWSERLESS_TOKEN}"
+        payload = build_profile_state(cookies)
+        
+        logger.info(f"📤 Uploading new profile: {PROFILE_NAME}")
+        response = requests.post(
+            upload_url,
+            json=payload,
+            headers=get_browserless_headers(),
+            timeout=30
+        )
+        
+        if response.status_code in [200, 201]:
+            logger.info(f"✅ Profile uploaded successfully: {PROFILE_NAME}")
+            return True
+        else:
+            logger.error(f"❌ Upload failed: {response.status_code} - {response.text}")
+            return False
+    except Exception as e:
+        logger.error(f"❌ Upload error: {e}")
+        return False
+
+def refresh_profile_via_api(cookies):
+    """Refresh an existing profile using POST /profile/refresh."""
+    try:
+        refresh_url = f"{BROWSERLESS_ORIGIN}/profile/refresh?token={BROWSERLESS_TOKEN}"
+        payload = build_profile_state(cookies)
+        
+        logger.info(f"🔄 Refreshing profile: {PROFILE_NAME}")
+        response = requests.post(
+            refresh_url,
+            json=payload,
+            headers=get_browserless_headers(),
+            timeout=30
+        )
+        
+        if response.status_code == 200:
+            logger.info(f"✅ Profile refreshed successfully: {PROFILE_NAME}")
+            return True
+        else:
+            logger.error(f"❌ Refresh failed: {response.status_code} - {response.text}")
+            return False
+    except Exception as e:
+        logger.error(f"❌ Refresh error: {e}")
+        return False
+
+# ============================================
+# MAIN EXTRACT FUNCTION
+# ============================================
 
 def extract_cookies_from_browserless():
-    """Extract cookies from Browserless profile and refresh the profile"""
+    """Extract cookies from Browserless profile."""
     logger.info("🍪 Starting cookie extraction...")
     
     if not BROWSERLESS_TOKEN:
@@ -511,7 +530,6 @@ def extract_cookies_from_browserless():
         with sync_playwright() as p:
             logger.info("🔗 Connecting to Browserless...")
             
-            # Try to connect with profile
             try:
                 browser = p.chromium.connect_over_cdp(
                     f"wss://{BROWSERLESS_ORIGIN.replace('https://', '')}?token={BROWSERLESS_TOKEN}&profile={PROFILE_NAME}"
@@ -527,12 +545,10 @@ def extract_cookies_from_browserless():
             context = browser.contexts[0] if browser.contexts else browser.new_context()
             page = context.new_page()
             
-            # Navigate to Instagram
             logger.info("🌐 Navigating to Instagram...")
             page.goto("https://www.instagram.com/", wait_until="networkidle")
             time.sleep(2)
             
-            # Check if logged in
             if "login" in page.url or page.url.startswith("https://www.instagram.com/accounts/login/"):
                 logger.info("🔑 Not logged in, attempting login...")
                 login_success = login_to_instagram(page)
@@ -540,21 +556,11 @@ def extract_cookies_from_browserless():
                     browser.close()
                     return {"success": False, "error": "Login failed - need 2FA or verification"}
             
-            # Extract cookies
             logger.info("🍪 Extracting cookies...")
             cookies = context.cookies()
             logger.info(f"✅ Extracted {len(cookies)} cookies")
             
             browser.close()
-            
-            # 🔥 Refresh the Browserless profile with new cookies
-            refresh_success = False
-            if cookies:
-                refresh_success = refresh_browserless_profile_with_cookies(cookies)
-                if refresh_success:
-                    logger.info("✅ Browserless profile refreshed with new cookies")
-                else:
-                    logger.warning("⚠️ Failed to refresh Browserless profile, but cookies were extracted")
             
             # Send cookies to Vercel
             if cookies:
@@ -563,8 +569,7 @@ def extract_cookies_from_browserless():
             return {
                 "success": True,
                 "cookies": cookies,
-                "count": len(cookies),
-                "refresh_status": "refreshed" if refresh_success else "failed"
+                "count": len(cookies)
             }
             
     except Exception as e:
@@ -572,139 +577,78 @@ def extract_cookies_from_browserless():
         return {"success": False, "error": str(e)}
 
 # ============================================
-# REFRESH BROWSERLESS PROFILE - RE-RUN LOGIN
+# REFRESH - CREATE NEW PROFILE
 # ============================================
 
 def refresh_browserless_profile():
     """
-    Re-run the login flow to capture a fresh profile state,
-    then update the stored profile with the new cookie values.
+    Create a brand new profile by:
+    1. Deleting existing profile
+    2. Logging in fresh
+    3. Uploading new profile state
     """
-    logger.info("🔄 Refreshing Browserless profile by re-running login flow...")
+    logger.info("🔄 Creating fresh profile...")
     
     if not BROWSERLESS_TOKEN:
-        logger.error("❌ BROWSERLESS_API_KEY not set")
         return {"success": False, "error": "BROWSERLESS_API_KEY not set"}
+    
+    if not INSTAGRAM_USERNAME or not INSTAGRAM_PASSWORD:
+        return {"success": False, "error": "Instagram credentials not set"}
     
     try:
         with sync_playwright() as p:
             logger.info("🔗 Connecting to Browserless...")
             
-            # Connect with the profile
+            # Step 1: Delete existing profile
+            delete_browserless_profile()
+            
+            # Step 2: Connect and log in
             browser = p.chromium.connect_over_cdp(
-                f"wss://{BROWSERLESS_ORIGIN.replace('https://', '')}?token={BROWSERLESS_TOKEN}&profile={PROFILE_NAME}"
+                f"wss://{BROWSERLESS_ORIGIN.replace('https://', '')}?token={BROWSERLESS_TOKEN}"
             )
-            logger.info(f"✅ Connected with profile: {PROFILE_NAME}")
+            logger.info("✅ Connected to Browserless")
             
             context = browser.contexts[0] if browser.contexts else browser.new_context()
+            page = context.new_page()
             
-            # Check if we have any pages
-            if not context.pages:
-                page = context.new_page()
-            else:
-                page = context.pages[0]
-            
-            # Navigate to Instagram
-            logger.info("🌐 Navigating to Instagram...")
-            page.goto("https://www.instagram.com/", wait_until="networkidle")
+            # Step 3: Login
+            logger.info("🌐 Navigating to Instagram login...")
+            page.goto("https://www.instagram.com/accounts/login/", wait_until="networkidle")
             time.sleep(2)
             
-            # Check if logged in
-            if "login" in page.url or page.url.startswith("https://www.instagram.com/accounts/login/"):
-                logger.info("🔑 Not logged in, attempting login...")
-                login_success = login_to_instagram(page)
-                if not login_success:
-                    browser.close()
-                    return {"success": False, "error": "Login failed - need 2FA or verification"}
-            else:
-                logger.info("✅ Already logged in")
+            login_success = login_to_instagram(page)
+            if not login_success:
+                browser.close()
+                return {"success": False, "error": "Login failed"}
             
-            # Extract fresh cookies
-            logger.info("🍪 Extracting fresh cookies...")
-            fresh_cookies = context.cookies()
-            logger.info(f"✅ Extracted {len(fresh_cookies)} cookies")
-            
-            # Format cookies for Browserless state
-            formatted_cookies = []
-            for cookie in fresh_cookies:
-                formatted_cookies.append({
-                    "name": cookie.get('name', ''),
-                    "value": cookie.get('value', ''),
-                    "domain": cookie.get('domain', '.instagram.com'),
-                    "path": cookie.get('path', '/'),
-                    "expires": cookie.get('expirationDate', -1),
-                    "httpOnly": cookie.get('httpOnly', False),
-                    "secure": cookie.get('secure', False),
-                    "session": cookie.get('session', True)
-                })
-            
-            # 🔥 Save the profile state via Browserless /profile/refresh
-            save_url = f"{BROWSERLESS_ORIGIN}/profile/refresh?token={BROWSERLESS_TOKEN}"
-            save_payload = {
-                "name": PROFILE_NAME,
-                "state": {
-                    "cookies": formatted_cookies,
-                    "origins": []  # Required by Browserless
-                }
-            }
-            
-            logger.info("💾 Saving profile state to Browserless...")
-            save_response = requests.post(
-                save_url,
-                json=save_payload,
-                headers={"Content-Type": "application/json"},
-                timeout=30
-            )
-            
-            if save_response.status_code == 200:
-                logger.info("✅ Profile state saved successfully!")
-                refresh_success = True
-            elif save_response.status_code == 404:
-                logger.warning("⚠️ Profile not found, creating new profile...")
-                
-                # Create new profile
-                create_url = f"{BROWSERLESS_ORIGIN}/profile/create?token={BROWSERLESS_TOKEN}"
-                create_response = requests.post(
-                    create_url,
-                    json=save_payload,
-                    headers={"Content-Type": "application/json"},
-                    timeout=30
-                )
-                
-                if create_response.status_code in [200, 201]:
-                    logger.info(f"✅ Browserless profile created: {PROFILE_NAME}")
-                    refresh_success = True
-                else:
-                    logger.error(f"❌ Profile creation failed: {create_response.status_code}")
-                    refresh_success = False
-            else:
-                logger.error(f"❌ Failed to save profile state: {save_response.status_code}")
-                refresh_success = False
+            # Step 4: Extract cookies
+            logger.info("🍪 Extracting cookies...")
+            cookies = context.cookies()
+            logger.info(f"✅ Extracted {len(cookies)} cookies")
             
             browser.close()
             
-            # Send cookies to Vercel
-            if fresh_cookies:
-                send_cookies_to_vercel(fresh_cookies)
+            # Step 5: Upload the profile
+            if cookies:
+                upload_success = create_profile_via_upload(cookies)
+                if upload_success:
+                    logger.info(f"✅ Profile '{PROFILE_NAME}' created successfully")
+                else:
+                    logger.warning("⚠️ Profile upload failed, but cookies were extracted")
             
-            if refresh_success:
-                return {
-                    "success": True,
-                    "message": "Profile refreshed with fresh cookies from login flow",
-                    "cookies": fresh_cookies,
-                    "count": len(fresh_cookies)
-                }
-            else:
-                return {
-                    "success": True,  # Still return cookies even if refresh failed
-                    "message": "Cookies extracted but profile refresh failed",
-                    "cookies": fresh_cookies,
-                    "count": len(fresh_cookies),
-                    "refresh_status": "failed"
-                }
+            # Step 6: Send to Vercel
+            if cookies:
+                send_cookies_to_vercel(cookies)
+            
+            return {
+                "success": True,
+                "message": f"New profile '{PROFILE_NAME}' created with {len(cookies)} cookies",
+                "cookies": cookies,
+                "count": len(cookies)
+            }
             
     except Exception as e:
-        logger.error(f"❌ Refresh error: {e}")
+        logger.error(f"❌ Error: {e}")
         return {"success": False, "error": str(e)}
 
 # ============================================
@@ -712,7 +656,7 @@ def refresh_browserless_profile():
 # ============================================
 
 def send_cookies_to_vercel(cookies):
-    """Send extracted cookies to Vercel webhook"""
+    """Send extracted cookies to Vercel webhook."""
     if not VERCEL_WEBHOOK_URL:
         logger.warning("⚠️ VERCEL_WEBHOOK_URL not set, skipping")
         return
@@ -720,7 +664,6 @@ def send_cookies_to_vercel(cookies):
     try:
         logger.info(f"📤 Sending {len(cookies)} cookies to Vercel...")
         
-        # Get username from cookies
         username = None
         for cookie in cookies:
             if cookie.get('name') == 'ds_user_id':
@@ -756,34 +699,33 @@ def index():
 
 @app.route('/api/extract', methods=['POST'])
 def api_extract():
-    """API endpoint to extract cookies and refresh profile"""
+    """API endpoint to extract cookies."""
     result = extract_cookies_from_browserless()
     return jsonify(result)
 
 @app.route('/api/refresh', methods=['POST'])
 def api_refresh():
-    """API endpoint to re-run login flow and refresh Browserless profile"""
-    logger.info("🔄 Refresh endpoint called - re-running login flow...")
+    """API endpoint to create a fresh profile."""
+    logger.info("🔄 Refresh endpoint called - creating fresh profile...")
     
     result = refresh_browserless_profile()
     
     if result.get('success'):
         return jsonify({
             "success": True,
-            "message": result.get('message', 'Profile refreshed successfully'),
+            "message": result.get('message', 'Profile created successfully'),
             "cookies": result.get('cookies', []),
-            "count": len(result.get('cookies', [])),
-            "refresh_status": result.get('refresh_status', 'success')
+            "count": len(result.get('cookies', []))
         })
     else:
         return jsonify({
             "success": False,
-            "error": result.get('error', 'Failed to refresh profile')
+            "error": result.get('error', 'Failed to create profile')
         }), 500
 
 @app.route('/api/send-to-vercel', methods=['POST'])
 def api_send_to_vercel():
-    """API endpoint to send cookies to Vercel"""
+    """API endpoint to send cookies to Vercel."""
     data = request.get_json(silent=True) or {}
     cookies = data.get('cookies', [])
     
