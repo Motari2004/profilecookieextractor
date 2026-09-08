@@ -390,10 +390,12 @@ def refresh_browserless_profile_with_cookies(cookies):
                 "session": cookie.get('session', True)
             })
         
+        # ✅ Browserless expects BOTH cookies AND origins arrays
         refresh_payload = {
             "name": PROFILE_NAME,
             "state": {
-                "cookies": formatted_cookies
+                "cookies": formatted_cookies,
+                "origins": []  # Required by Browserless API
             }
         }
         
